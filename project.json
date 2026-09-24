@@ -1,0 +1,87 @@
+{
+	"authors": [ "Manuel Barrio Linares <mbarriolinares@gmail.com>" ],
+	"sources": [ "src/**" ],
+	"c-sources": [ "csource/**" ],
+	"c-include-dirs": [ "csource/include/" ],
+	// "cflags": "-D MINIAUDIO_IMPLEMENTATION",
+	// -D MA_ENABLE_ONLY_SPECIFIC_BACKENDS -D MA_ENABLE_NULL -D MA_ENABLE_PIPEWIRE 
+	"cflags": "  -D MA_NO_DECODING -D MA_NO_RESOURCE_MANAGER -D MA_NO_NODE_GRAPH -D MA_NO_GENERATION",
+	"build-dir": "build",
+	"output": "build",
+	"script-dir": ".",
+	"targets": {
+		"linux": {
+			"name": "c3aud_linux",
+			"type": "executable",
+			"features": ["WAYLAND"],
+			"linker-search-paths": [
+				"deps/ffmpeg-linux/lib"
+			],
+			"link-args": [
+				"-Wl,--start-group",
+				"-lavformat",
+				"-lavcodec",
+				"-lswresample",
+				"-lavutil",
+				"-Wl,--end-group"
+			]
+		},
+		"windows": {
+			"name": "c3aud_windows",
+			"type": "executable",
+			"target": "windows-x64",
+			"cc": "clang",
+			"cflags": "-fno-pie --target=x86_64-pc-windows-msvc -idirafter deps/msvc_sdk/include/crt -idirafter deps/msvc_sdk/include/x64/ucrt -idirafter deps/msvc_sdk/include/x64/shared -idirafter deps/msvc_sdk/include/x64/um",
+			"linker-search-paths": [
+				"deps/ffmpeg-windows/lib"
+			],
+			"linked-libraries": [
+				"bcrypt",
+				"oldnames"
+			]
+		},
+		"macos-aarch64": {
+			"name": "c3aud_macaarch64",
+			"type": "executable",
+			"target": "macos-aarch64",
+			"cc": "clang",
+			"cflags": "--target=arm64-apple-macos11.0 -isysroot deps/MacOSX.sdk",
+			"linker-search-paths": [
+				"deps/ffmpeg-macos-aarch64/lib"
+			]
+		},
+		"macos-x64": {
+			"name": "c3aud_macx64",
+			"type": "executable",
+			"target": "macos-x64",
+			"cc": "clang",
+			"cflags": "--target=x86_64-apple-macos11.0 -isysroot deps/MacOSX.sdk",
+			"linker-search-paths": [
+				"deps/ffmpeg-macos-x64/lib"
+			]
+		},
+		"web": {
+			"name": "index.html",
+			"type": "executable",
+			"target": "emscripten",
+			"link-args": [
+				"-sALLOW_MEMORY_GROWTH=1",
+				"-sMIN_WEBGL_VERSION=2",
+				"-sMAX_WEBGL_VERSION=2",
+				"-sSTACK_SIZE=2097152",
+				"--profiling-funcs",
+				"--shell-file resources/minshell.html"
+			]
+		},
+		"deps-linux": {
+			"type": "prepare",
+			"exec": [ "./scripts/build_ffmpeg.sh linux" ]
+		},
+		"deps-win": {
+			"type": "prepare",
+			"exec": [ "./scripts/build_ffmpeg.sh windows" ]
+		}
+	},
+	"cpu": "generic",
+	"opt": "O0"
+}

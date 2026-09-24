@@ -1,0 +1,129 @@
+name: CI & Release
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+    paths-ignore:
+      - 'README.md'
+      - '.gitignore'
+  pull_request:
+    branches: [ main ]
+    paths-ignore:
+      - 'README.md'
+      - '.gitignore'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+jobs:
+  build-and-release:
+    name: Build & Package (All Targets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ManuLinares/setup-c3@main
+        with:
+          version: nightly
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libx11-dev \
+            libxext-dev \
+            libxrandr-dev \
+            libgl1-mesa-dev
+
+      - name: Get current month
+        id: get-date
+        run: echo "month=$(/bin/date -u '+%Y-%m')" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Cache dependencies
+        id: cache-deps
+        uses: actions/cache@v6
+        with:
+          path: |
+            deps
+            ~/.cache/c3
+          key: deps-${{ runner.os }}-${{ steps.get-date.outputs.month }}-${{ hashFiles('scripts/build_ffmpeg.sh') }}
+          restore-keys: |
+            deps-${{ runner.os }}-${{ steps.get-date.outputs.month }}-
+
+      - name: Fetch SDKs
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: |
+          c3c fetch-sdk windows --accept-license --arch x64 --fetch-headers
+          c3c fetch-sdk macos --accept-license
+
+      - name: Link SDKs
+        run: |
+          mkdir -p deps
+          ln -sfn ~/.cache/c3/msvc_sdk deps/msvc_sdk
+          ln -sfn ~/.cache/c3/MacOSX.sdk deps/MacOSX.sdk
+
+      - name: Build FFmpeg libraries
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: |
+          ./scripts/build_ffmpeg.sh linux
+          ./scripts/build_ffmpeg.sh windows
+          ./scripts/build_ffmpeg.sh macos-aarch64
+          ./scripts/build_ffmpeg.sh macos-x64
+
+      - name: Build binaries
+        run: |
+          c3c build linux -O5 -g0
+          c3c build windows -O5 -g0 -t3
+          c3c build macos-aarch64 -O5 -g0 -t3
+          c3c build macos-x64 -O5 -g0 -t3
+
+      - name: Package release archives
+        run: |
+          chmod +x build/c3aud_linux build/c3aud_macaarch64 build/c3aud_macx64
+          tar -czf build/c3aud-linux-x64.tar.gz -C build c3aud_linux
+          tar -czf build/c3aud-macos-aarch64.tar.gz -C build c3aud_macaarch64
+          tar -czf build/c3aud-macos-x64.tar.gz -C build c3aud_macx64
+          zip -j build/c3aud-windows-x64.zip build/c3aud_windows.exe
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: binaries
+          path: |
+            build/*.tar.gz
+            build/*.zip
+
+      - name: Move 'latest' tag
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git tag -f latest "${{ github.sha }}"
+          git push -f origin latest
+
+      - name: Update 'latest' release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: latest
+          name: Latest Build
+          prerelease: false
+          make_latest: true
+          files: |
+            build/*.tar.gz
+            build/*.zip
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            build/*.tar.gz
+            build/*.zip
+          generate_release_notes: true
