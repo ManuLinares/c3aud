@@ -44,18 +44,32 @@ fn void draw_text(GfxSize win_sz, String text, int x, int y, int size, Vec4 colo
 	TextVertex* v = &state.text_verts.entries[state.text_verts.size];
 	sz count = 0;
 
-	foreach (char c : text)
+	for (sz si = 0; si < text.len; )
 	{
+		char c = text[si];
 		if (c == '\n')
 		{
 			cur_x = (float)x;
 			cur_y += 10.0f * scale;
+			si++;
 			continue;
 		}
 
 		if (max_w > 0 && cur_x >= limit_x) break;
 
-		if (c < 32 || c > 126)
+		sz width = text.len - si;
+		Char32 cp = c;
+		if (try decoded = conv::utf8_to_char32(&text[si], &width))
+		{
+			cp = decoded;
+		}
+		else
+		{
+			width = 1;
+		}
+		si += width;
+
+		if (cp < 32 || cp > 255)
 		{
 			cur_x += advance;
 			continue;
@@ -78,7 +92,7 @@ fn void draw_text(GfxSize win_sz, String text, int x, int y, int size, Vec4 colo
 			col_right = pack_color(cr);
 		}
 
-		int idx = (int)c;
+		int idx = (int)cp;
 		int gx  = (idx % 16) * 8;
 		int gy  = (idx / 16) * 8;
 
@@ -210,4 +224,23 @@ enum FontGlyph : (char ch, ulong bitmap)
 	LESS      { '<', 0b00010_00100_01000_10000_01000_00100_00010_00000UL },
 	GREATER   { '>', 0b01000_00100_00010_00001_00010_00100_01000_00000UL },
 	PIPE      { '|', 0b00100_00100_00100_00100_00100_00100_00100_00000UL },
+
+	UPPER_A_ACUTE     { (char)193, 0b00010_01110_10001_10001_11111_10001_10001_10001UL },
+	UPPER_E_ACUTE     { (char)201, 0b00010_11111_10000_10000_11110_10000_10000_11111UL },
+	UPPER_I_ACUTE     { (char)205, 0b00010_01110_00100_00100_00100_00100_00100_01110UL },
+	UPPER_N_TILDE     { (char)209, 0b01100_10001_11001_10101_10011_10001_10001_10001UL },
+	UPPER_O_ACUTE     { (char)211, 0b00010_01110_10001_10001_10001_10001_10001_01110UL },
+	UPPER_U_ACUTE     { (char)218, 0b00010_10001_10001_10001_10001_10001_10001_01110UL },
+	UPPER_U_DIERESIS  { (char)220, 0b01010_10001_10001_10001_10001_10001_10001_01110UL },
+
+	LOWER_A_ACUTE     { (char)225, 0b00010_00100_01111_00001_01111_10001_01111_00000UL },
+	LOWER_E_ACUTE     { (char)233, 0b00010_00100_01111_10001_11111_10000_01111_00000UL },
+	LOWER_I_ACUTE     { (char)237, 0b00010_00100_01100_00100_00100_00100_01110_00000UL },
+	LOWER_N_TILDE     { (char)241, 0b01100_00110_11110_10001_10001_10001_10001_00000UL },
+	LOWER_O_ACUTE     { (char)243, 0b00010_00100_01110_10001_10001_10001_01110_00000UL },
+	LOWER_U_ACUTE     { (char)250, 0b00010_00100_10001_10001_10001_10011_01101_00000UL },
+	LOWER_U_DIERESIS  { (char)252, 0b00000_01010_10001_10001_10001_10011_01101_00000UL },
+
+	INVERTED_EXCLAM   { (char)161, 0b00000_00100_00000_00100_00100_00100_00100_00000UL },
+	INVERTED_QUESTION { (char)191, 0b00000_00100_00000_00100_00010_10001_01110_00000UL },
 }

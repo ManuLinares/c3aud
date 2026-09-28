@@ -7,6 +7,9 @@ const int WINDOW_HEIGHT      = 600;
 const int WINDOW_MIN_WIDTH   = 480;
 const int WINDOW_MIN_HEIGHT  = 320;
 
+const float SEEK_STEP_SEC            = 5.0f;
+const double DOUBLE_CLICK_TIMEOUT_SEC = 0.35;
+
 AppState state;
 struct AppState
 {
@@ -134,9 +137,9 @@ fn void dispatch_event(GfxEvent* e)
 				case END:
 					playlist_move_selection((int)state.playlist.len(), shift);
 				case LEFT:
-					audio_seek_relative(-5.0f);
+					audio_seek_relative(-SEEK_STEP_SEC);
 				case RIGHT:
-					audio_seek_relative(5.0f);
+					audio_seek_relative(SEEK_STEP_SEC);
 				case DELETE:
 					remove_selected_tracks();
 				case F11:
@@ -147,13 +150,13 @@ fn void dispatch_event(GfxEvent* e)
 
 		case KEY_CHAR:
 			uint cp = e.key_char.value;
-			if (cp > 32 && cp <= 126)
+			if ((cp > 32 && cp <= 126) || (cp >= 160 && cp <= 255))
 			{
-				filter_append_char((char)cp);
+				filter_append_codepoint(cp);
 			}
 			else if (cp == 32 && state.filter_active)
 			{
-				filter_append_char((char)cp);
+				filter_append_codepoint(cp);
 			}
 
 		case MOUSE_SCROLL:
@@ -167,7 +170,7 @@ fn void dispatch_event(GfxEvent* e)
 				case layout.volume_hit.contains_point(m):
 					state.audio.volume = math::clamp(state.audio.volume + dir * 0.05f, 0.0f, 1.0f);
 				case layout.timeline_hit.contains_point(m):
-					audio_seek_relative(dir * 5.0f);
+					audio_seek_relative(dir * SEEK_STEP_SEC);
 				default:
 					int max_s = layout.max_scroll(playlist_view_count());
 					state.scroll_row = math::clamp(state.scroll_row - (int)(dir * 3.0f), 0, max_s);
@@ -186,15 +189,18 @@ fn void dispatch_event(GfxEvent* e)
 			}
 			else
 			{
-				UiLayout layout = compute_layout(state.win.get_size());
-				state.drop_insert_idx = layout.track_index_at(e.drag.pos, state.scroll_row, (int)state.playlist.len());
+				state.drop_insert_idx = playlist_drop_target_index(e.drag.pos);
 			}
 
 		case DATA_DROP:
 			if (state.drop_insert_idx < 0)
 			{
-				UiLayout layout = compute_layout(state.win.get_size());
-				state.drop_insert_idx = layout.track_index_at(state.win.get_mouse(), state.scroll_row, (int)state.playlist.len());
+				state.drop_insert_idx = playlist_drop_target_index(state.win.get_mouse());
+			}
+
+			if (state.filter_active)
+			{
+				filter_deactivate();
 			}
 
 			for (GfxDataDropNode* node = e.drop.value; node != null; node = node.next)
@@ -257,7 +263,7 @@ fn void main(String[] args) @winmain
 		ensure_track_visible(0);
 	}
 
-	$if $feat(EMSCRIPTEN) || $feat(WASM):
+	$if $feat(EMSCRIPTEN | WASM):
 		emscripten_set_main_loop(&step_web, 0, 1);
 	$else
 		const Duration FRAME_DURATION = time::SEC / 60;
@@ -277,7 +283,6 @@ fn void main(String[] args) @winmain
 					{
 						dispatch_event(&ev);
 					}
-					state.drop_insert_idx = -1;
 
 					if (state.audio.track_eof)
 					{
@@ -319,7 +324,6 @@ fn void main(String[] args) @winmain
 						{
 							dispatch_event(&queued);
 						}
-						state.drop_insert_idx = -1;
 						on_repaint(state.win, state.win.bounds);
 					}
 				}
@@ -337,7 +341,6 @@ fn void step_web() => @pool()
 	{
 		dispatch_event(&ev);
 	}
-	state.drop_insert_idx = -1;
 	if (state.audio.track_eof)
 	{
 		state.audio.track_eof = false;
@@ -450,7 +453,7 @@ fn void init_app()
 	state.filter_len = 0;
 	state.filter_text = {};
 	state.filtered_indices.init(mem);
-	random::seed(&state.rng, 1337UL);
+	random::seed_entropy(&state.rng);
 
 	GfxInitOption opts = { .init_opengl, .enable_x11_resize_sync };
 	gfx::init(WINDOW_TITLE, opts)!!;
@@ -487,8 +490,8 @@ fn void init_app()
 
 	MaDeviceConfig config = ma::device_config_init(MA_DEVICE_TYPE_PLAYBACK);
 	config.playback.format   = MA_FORMAT_F32;
-	config.playback.channels = 2;
-	config.sample_rate       = 48000;
+	config.playback.channels = AUDIO_CHANNELS;
+	config.sample_rate       = AUDIO_SAMPLE_RATE;
 	config.data_callback     = &audio_callback;
 	config.p_user_data       = &state.audio;
 
@@ -497,7 +500,7 @@ fn void init_app()
 	assert(res == MA_SUCCESS, "Failed to initialize miniaudio device");
 	ma::device_start(state.device);
 
-	$if !$feat(EMSCRIPTEN) && !$feat(WASM):
+	$if !$feat(EMSCRIPTEN | WASM):
 		state.audio.disk_thread.create(&disk_stream_worker, &state.audio)!!;
 	$endif
 }
@@ -509,7 +512,7 @@ fn void cleanup_app()
 	(void)state.audio.buffer_needed.broadcast();
 	state.audio.stream_lock.unlock();
 
-	$if !$feat(EMSCRIPTEN) && !$feat(WASM):
+	$if !$feat(EMSCRIPTEN | WASM):
 		state.audio.disk_thread.join()!!;
 	$endif
 	state.audio.buffer_needed.destroy();

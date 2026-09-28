@@ -24,14 +24,10 @@ fn String? resolve_soundfont_path() => @pool()
 	Path? dir_path = path::tnew("/usr/share/soundfonts");
 	if (try dir_path && path::is_dir(dir_path))
 	{
-		PathList? list = path::ls(tmem, dir_path, no_dirs: true, recursive: true, relative: false);
-		if (try list)
+		PathList? list = path::ls(tmem, dir_path, no_dirs: true, mask: "*.sf2", recursive: true, relative: false);
+		if (try list && list.len() > 0)
 		{
-			foreach (entry : list)
-			{
-				String s = (String)entry;
-				if (s.ends_with(".sf2")) return s.copy(mem);
-			}
+			return ((String)list[0]).copy(mem);
 		}
 	}
 	return NOT_FOUND~;
@@ -46,6 +42,13 @@ fn String? get_soundfont()
 	log::info("Selected SoundFont: '%s'", active_soundfont_path, category: log::CATEGORY_AUDIO);
 	return active_soundfont_path;
 }
+
+const uint AUDIO_SAMPLE_RATE    = 48000;
+const uint AUDIO_CHANNELS       = 2;
+const uint AUDIO_FRAME_BYTES    = AUDIO_CHANNELS * float::size;
+const uint RING_BUFFER_FRAMES   = AUDIO_SAMPLE_RATE * 2;
+const double SAMPLES_PER_MS     = AUDIO_SAMPLE_RATE / (double)time::MS;
+const ulong PREV_TRACK_REWIND_THRESHOLD_FRAMES = 3 * AUDIO_SAMPLE_RATE;
 
 const int AV_LOG_QUIET = -8;
 const uint SCOPE_SIZE  = 1024;
@@ -95,16 +98,9 @@ fn void custom_av_log_callback(void* avcl, int level, ZString fmt, CVaList vl)
 // Format Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn String? path_get_extension(String path)
-{
-	sz? dot = path.rindex_of_char('.');
-	if (catch dot) return NOT_FOUND~;
-	return path[dot + 1..];
-}
-
 fn bool is_midi_path(String path)
 {
-	if (try ext = path_get_extension(path))
+	if (try ext = ((Path)path).extension())
 	{
 		return ext.compare_to_ignore_case("mid") == 0 || ext.compare_to_ignore_case("midi") == 0;
 	}
@@ -119,7 +115,7 @@ fn ulong midi_calculate_frames(TmlMessage* msgs)
 {
 	uint time_len_ms = 0;
 	tml::get_info(msgs, null, null, null, null, &time_len_ms);
-	return (ulong)((double)time_len_ms * 48.0);
+	return (ulong)(time_len_ms * SAMPLES_PER_MS);
 }
 
 fn void midi_dispatch(Tsf* synth, TmlMessage* msg, bool play_notes)
@@ -162,10 +158,10 @@ fn MidiDecoder*? midi_decoder_open(String path) => @pool()
 		return null;
 	}
 
-	tsf::set_output(synth, STEREO_INTERLEAVED, 48000, 0.0f);
+	tsf::set_output(synth, STEREO_INTERLEAVED, AUDIO_SAMPLE_RATE, 0.0f);
 
 	ulong total_frames = midi_calculate_frames(msgs);
-	uint time_len_ms = (uint)((double)total_frames / 48.0);
+	uint time_len_ms = (uint)(total_frames / SAMPLES_PER_MS);
 	int total_notes = 0;
 	tml::get_info(msgs, null, null, &total_notes, null, null);
 	log::info("Loaded MIDI '%s' (len: %d ms, notes: %d)", path, time_len_ms, total_notes, category: log::CATEGORY_AUDIO);
@@ -194,7 +190,7 @@ fn void midi_decoder_seek(MidiDecoder* dec, ulong frame_target)
 	tsf::reset(dec.synth);
 
 	dec.current_frame = frame_target;
-	uint target_ms = (uint)((double)frame_target / 48.0);
+	uint target_ms = (uint)(frame_target / SAMPLES_PER_MS);
 	dec.current_msg = dec.messages;
 
 	while (dec.current_msg != null && dec.current_msg.time <= target_ms)
@@ -216,7 +212,7 @@ fn ulong midi_decoder_read(MidiDecoder* dec, void* p_buf, ulong frames_to_read)
 	while (frames_rendered < frames_to_read)
 	{
 		ulong block = math::min(frames_to_read - frames_rendered, (ulong)BLOCK_SIZE);
-		uint cur_ms = (uint)((double)dec.current_frame / 48.0);
+		uint cur_ms = (uint)(dec.current_frame / SAMPLES_PER_MS);
 
 		while (dec.current_msg != null && dec.current_msg.time <= cur_ms)
 		{
@@ -251,7 +247,7 @@ fn AVFormatContext*? ffmpeg_open_context(String path) => @pool()
 	int ret = avformat::open_input(&fmt, path.zstr_tcopy(), null, null);
 	if (ret < 0)
 	{
-		String? ext = path_get_extension(path);
+		String? ext = ((Path)path).extension();
 		if (try ext)
 		{
 			void* ifmt = avformat::av_find_input_format(ext.to_lower_tcopy().zstr_tcopy());
@@ -269,13 +265,13 @@ fn ulong ffmpeg_stream_frames(AVFormatContext* fmt, AVStream* stream)
 {
 	if (stream != null && stream.duration > 0 && stream.time_base.den > 0)
 	{
-		double sec = (double)stream.duration * (double)stream.time_base.num / (double)stream.time_base.den;
-		return (ulong)(sec * 48000.0);
+		double sec = (double)stream.duration * stream.time_base.num / stream.time_base.den;
+		return (ulong)(sec * AUDIO_SAMPLE_RATE);
 	}
 	if (fmt != null && fmt.duration > 0)
 	{
-		double sec = (double)fmt.duration / 1000000.0;
-		return (ulong)(sec * 48000.0);
+		double sec = ((Duration)fmt.duration).to_sec();
+		return (ulong)(sec * AUDIO_SAMPLE_RATE);
 	}
 	return 0;
 }
@@ -323,7 +319,7 @@ fn FfmpegDecoder*? ffmpeg_decoder_open(String path) => @pool()
 		&swr,
 		&out_layout,
 		AV_SAMPLE_FMT_FLT,
-		48000,
+		AUDIO_SAMPLE_RATE,
 		&codec_ctx.ch_layout,
 		codec_ctx.sample_fmt,
 		codec_ctx.sample_rate,
@@ -369,8 +365,8 @@ fn void ffmpeg_decoder_seek(FfmpegDecoder* dec, ulong frame_target)
 {
 	if (dec == null || dec.fmt_ctx == null) return;
 	AVStream* stream = dec.fmt_ctx.streams[dec.stream_idx];
-	double sec = (double)frame_target / 48000.0;
-	long ts = (long)(sec * (double)stream.time_base.den / (double)stream.time_base.num);
+	double sec = (double)frame_target / AUDIO_SAMPLE_RATE;
+	long ts = (long)(sec * stream.time_base.den / stream.time_base.num);
 	avformat::av_seek_frame(dec.fmt_ctx, dec.stream_idx, ts, AVSEEK_FLAG_BACKWARD);
 	avcodec::flush_buffers(dec.codec_ctx);
 	swresample::swr_init(dec.swr_ctx);
@@ -384,7 +380,7 @@ fn ulong ffmpeg_decoder_read(FfmpegDecoder* dec, void* p_buf, ulong frames_to_re
 
 	while (total_read < frames_to_read)
 	{
-		char* out_ptr = (char*)p_buf + total_read * 8;
+		char* out_ptr = (char*)p_buf + total_read * AUDIO_FRAME_BYTES;
 		int converted = swresample::swr_convert(dec.swr_ctx, &out_ptr, (int)(frames_to_read - total_read), null, 0);
 		if (converted > 0)
 		{
@@ -395,7 +391,7 @@ fn ulong ffmpeg_decoder_read(FfmpegDecoder* dec, void* p_buf, ulong frames_to_re
 		int ret = avcodec::receive_frame(dec.codec_ctx, dec.frame);
 		if (ret == 0)
 		{
-			out_ptr = (char*)p_buf + total_read * 8;
+			out_ptr = (char*)p_buf + total_read * AUDIO_FRAME_BYTES;
 			converted = swresample::swr_convert(dec.swr_ctx, &out_ptr, (int)(frames_to_read - total_read), (char**)dec.frame.extended_data, dec.frame.nb_samples);
 			avutil::av_frame_unref(dec.frame);
 			if (converted > 0)
@@ -744,7 +740,7 @@ fn void audio_callback(MaDevice* p_device, void* p_output, void* p_input, uint f
 		uint mapped = ma::audio_ring_buffer_map_consume(&audio.rb, frames_to_read, &p_buf);
 		if (mapped == 0) break;
 
-		mem::copy((char*)out + total_read * 8, p_buf, (sz)(mapped * 8));
+		mem::copy((char*)out + total_read * AUDIO_FRAME_BYTES, p_buf, (sz)(mapped * AUDIO_FRAME_BYTES));
 		ma::audio_ring_buffer_unmap_consume(&audio.rb, mapped);
 		total_read += mapped;
 	}
@@ -778,6 +774,9 @@ fn void audio_callback(MaDevice* p_device, void* p_output, void* p_input, uint f
 	}
 }
 
+const uint DISK_STREAM_CHUNK_FRAMES     = 4096;
+const uint DISK_STREAM_MIN_AVAIL_FRAMES = 2048;
+
 fn int disk_stream_worker(void* arg) => @pool_init(mem, 64 * 1024)
 {
 	AudioEngine* audio = (AudioEngine*)arg;
@@ -802,13 +801,13 @@ fn int disk_stream_worker(void* arg) => @pool_init(mem, 64 * 1024)
 		}
 
 		uint avail = ma::ring_buffer_capacity(&audio.rb.rb) - ma::ring_buffer_length(&audio.rb.rb);
-		if (avail < 2048 && !audio.track_eof)
+		if (avail < DISK_STREAM_MIN_AVAIL_FRAMES && !audio.track_eof)
 		{
 			audio.buffer_needed.wait(&audio.stream_lock);
 			continue;
 		}
 
-		uint to_write = math::min(avail, (uint)4096);
+		uint to_write = math::min(avail, DISK_STREAM_CHUNK_FRAMES);
 		void* p_buf = null;
 		uint mapped = ma::audio_ring_buffer_map_produce(&audio.rb, to_write, &p_buf);
 		if (mapped == 0)
@@ -846,7 +845,7 @@ fn bool audio_play_file(uint token, String path) => @pool()
 
 	if (!state.audio.rb_initialized)
 	{
-		MaAudioRingBufferConfig rb_cfg = ma::audio_ring_buffer_config_init(MA_FORMAT_F32, 2, 48000, 96000);
+		MaAudioRingBufferConfig rb_cfg = ma::audio_ring_buffer_config_init(MA_FORMAT_F32, AUDIO_CHANNELS, AUDIO_SAMPLE_RATE, RING_BUFFER_FRAMES);
 		ma::audio_ring_buffer_init(&rb_cfg, &state.audio.rb);
 		state.audio.rb_initialized = true;
 	}
@@ -938,7 +937,7 @@ fn void audio_seek_relative(float seconds)
 {
 	if (!state.audio.is_track_loaded) return;
 	log::debug("seek sec=%f cursor=%d req=%d frames=%d", seconds, (long)state.audio.track_cursor, state.audio.requested_seek, (long)state.audio.track_frames, category: log::CATEGORY_AUDIO);
-	long delta = (long)(seconds * 48000.0f);
+	long delta = (long)(seconds * AUDIO_SAMPLE_RATE);
 	long target = (long)state.audio.track_cursor + delta;
 	if (target < 0) target = 0;
 	audio_seek_absolute((ulong)target);

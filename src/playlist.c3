@@ -16,15 +16,8 @@ fn void set_playlist_item_frames(PlaylistItem* item, ulong frames)
 	item.total_frames = frames > 0 ? frames : 1;
 	if (frames > 1)
 	{
-		float dur_s = (float)frames / 48000.0f;
-		int m = (int)dur_s / 60;
-		int s = (int)dur_s % 60;
-		item.dur_str[0] = (char)('0' + (m / 10) % 10);
-		item.dur_str[1] = (char)('0' + m % 10);
-		item.dur_str[2] = ':';
-		item.dur_str[3] = (char)('0' + (s / 10) % 10);
-		item.dur_str[4] = (char)('0' + s % 10);
-		item.dur_str[5] = 0;
+		float dur_s = (float)frames / AUDIO_SAMPLE_RATE;
+		io::bprintf(&item.dur_str, "%02d:%02d", (int)dur_s / 60, (int)dur_s % 60);
 	}
 	else
 	{
@@ -74,37 +67,61 @@ fn int playlist_real_to_view_index(int real_idx)
 {
 	if (real_idx < 0) return -1;
 	if (!state.filter_active) return real_idx;
-	for (int i = 0; i < (int)state.filtered_indices.len(); i++)
+	return (int)(state.filtered_indices.index_of(real_idx) ?? -1);
+}
+
+fn char fold_char(Char32 cp)
+{
+	switch (cp)
 	{
-		if (state.filtered_indices[i] == real_idx) return i;
+		case 'A'..'Z':                 return (char)(cp + 32);
+		case 192..197: case 224..227: return 'a';
+		case 200..203: case 232..235: return 'e';
+		case 204..207: case 236..239: return 'i';
+		case 209:      case 241:      return 'n';
+		case 210..214: case 242..246: return 'o';
+		case 217..220: case 249..252: return 'u';
+		default:
+			return (cp <= 255) ? (char)cp : 0;
 	}
-	return -1;
+}
+
+fn sz fold_string(char[] out, String in)
+{
+	sz out_len = 0;
+	sz i = 0;
+	while (i < in.len && out_len < out.len)
+	{
+		sz width = in.len - i;
+		Char32 cp = in[i];
+		if (try decoded = conv::utf8_to_char32(&in[i], &width))
+		{
+			cp = decoded;
+		}
+		else
+		{
+			width = 1;
+		}
+		i += width;
+
+		char fc = fold_char(cp);
+		if (fc != 0) out[out_len++] = fc;
+	}
+	return out_len;
 }
 
 fn bool filter_match_name(String text, String pattern)
 {
 	if (pattern.len == 0) return true;
-	if (pattern.len > text.len) return false;
 
-	sz limit = text.len - pattern.len;
-	for (sz i = 0; i <= limit; i++)
-	{
-		bool match = true;
-		for (sz j = 0; j < pattern.len; j++)
-		{
-			char ct = text[i + j];
-			char cp = pattern[j];
-			if (ct >= 'A' && ct <= 'Z') ct += 32;
-			if (cp >= 'A' && cp <= 'Z') cp += 32;
-			if (ct != cp)
-			{
-				match = false;
-				break;
-			}
-		}
-		if (match) return true;
-	}
-	return false;
+	char[128] f_text;
+	sz t_len = fold_string(&f_text, text);
+
+	char[64] f_pat;
+	sz p_len = fold_string(&f_pat, pattern);
+
+	if (p_len == 0) return true;
+	return ((String)f_text[:t_len]).contains((String)f_pat[:p_len]);
 }
 
 fn void filter_apply()
@@ -144,13 +161,16 @@ fn void filter_deactivate()
 	gfx::wake();
 }
 
-fn void filter_append_char(char c)
+fn void filter_append_codepoint(Char32 cp)
 {
-	if (state.filter_len + 1 >= state.filter_text.len) return;
-	state.filter_active = true;
-	state.filter_text[state.filter_len++] = c;
-	state.filter_text[state.filter_len] = 0;
-	filter_apply();
+	sz rem = state.filter_text.len - 1 - state.filter_len;
+	if (try n = conv::char32_to_utf8(cp, state.filter_text[state.filter_len : rem]))
+	{
+		state.filter_active = true;
+		state.filter_len += n;
+		state.filter_text[state.filter_len] = 0;
+		filter_apply();
+	}
 }
 
 fn void filter_backspace()
@@ -159,6 +179,10 @@ fn void filter_backspace()
 	if (state.filter_len > 0)
 	{
 		state.filter_len--;
+		while (state.filter_len > 0 && (state.filter_text[state.filter_len] & 0xC0) == 0x80)
+		{
+			state.filter_len--;
+		}
 		state.filter_text[state.filter_len] = 0;
 		filter_apply();
 	}
@@ -181,6 +205,25 @@ fn void ensure_track_visible(int idx)
 	{
 		state.scroll_row = math::clamp(view_idx - layout.visible_rows + 1, 0, max_s);
 	}
+}
+
+fn int playlist_drop_target_index(GfxPoint m)
+{
+	GfxSize win_sz = state.win.get_size();
+	UiLayout layout = compute_layout(win_sz);
+	int count = playlist_view_count();
+
+	if (count > 0 && layout.playlist_area.contains_point(m))
+	{
+		int view_idx = layout.track_index_at(m, state.scroll_row, count);
+		int real_idx = playlist_view_to_real_index(view_idx);
+		if (real_idx >= 0) return real_idx;
+		if (state.filter_active)
+		{
+			return state.filtered_indices[(sz)(count - 1)] + 1;
+		}
+	}
+	return (int)state.playlist.len();
 }
 
 fn void rebuild_shuffle_order()
@@ -210,20 +253,16 @@ fn void rebuild_shuffle_order()
 	int cur = playlist_get_current_index();
 	if (cur >= 0)
 	{
-		for (int i = 0; i < (int)state.shuffle_order.len(); i++)
+		if (try pos = state.shuffle_order.index_of(cur))
 		{
-			if (state.shuffle_order[i] == cur)
-			{
-				state.shuffle_pos = i;
-				break;
-			}
+			state.shuffle_pos = (int)pos;
 		}
 	}
 }
 
 fn bool is_supported_audio_extension(String path) => @pool()
 {
-	String? ext = path_get_extension(path);
+	String? ext = ((Path)path).extension();
 	if (catch ext) return false;
 	if (ext.len == 0 || ext.len > 8) return false;
 
@@ -419,13 +458,9 @@ fn void play_track_index(int idx)
 
 	if (state.shuffle_mode)
 	{
-		for (int i = 0; i < (int)state.shuffle_order.len(); i++)
+		if (try pos = state.shuffle_order.index_of(idx))
 		{
-			if (state.shuffle_order[i] == idx)
-			{
-				state.shuffle_pos = i;
-				break;
-			}
+			state.shuffle_pos = (int)pos;
 		}
 	}
 	ensure_track_visible(idx);
@@ -524,7 +559,7 @@ fn void play_prev_track()
 	int count = (int)state.playlist.len();
 	if (count == 0) return;
 
-	if (state.audio.is_track_loaded && state.audio.track_cursor > 3 * 48000)
+	if (state.audio.is_track_loaded && state.audio.track_cursor > PREV_TRACK_REWIND_THRESHOLD_FRAMES)
 	{
 		audio_seek_absolute(0);
 		return;
@@ -542,7 +577,7 @@ fn void play_prev_track()
 	}
 
 	int cur = playlist_get_current_index();
-	int prev_idx = (cur - 1 + count) % count;
+	int prev_idx = cur <= 0 ? count - 1 : cur - 1;
 	play_track_index(prev_idx);
 }
 
@@ -589,15 +624,7 @@ fn void remove_selected_tracks()
 	int count = (int)state.playlist.len();
 	if (count == 0) return;
 
-	bool any_selected = false;
-	for (int i = 0; i < count; i++)
-	{
-		if (state.playlist[i].selected)
-		{
-			any_selected = true;
-			break;
-		}
-	}
+	bool any_selected = array::@any(state.playlist.array_view(), fn bool (PlaylistItem item, sz i) => item.selected);
 
 	if (!any_selected)
 	{
@@ -682,10 +709,7 @@ fn void reorder_selected_tracks(int target_idx) => @pool()
 	}
 	if (moving.len() == 0) return;
 
-	for (int i = count - 1; i >= 0; i--)
-	{
-		if (state.playlist[i].selected) state.playlist.remove_at((sz)i);
-	}
+	state.playlist.remove_if(fn bool (PlaylistItem* item) => item.selected);
 
 	insert_pos = math::clamp(insert_pos, 0, (int)state.playlist.len());
 	for (sz i = 0; i < moving.len(); i++)

@@ -282,7 +282,7 @@ fn void init_font()
 	char[] atlas = mem::new_array(char, 128 * 128 * 4);
 	defer free(atlas);
 
-	for (int i = 32; i < 127; i++)
+	for (int i = 32; i < 256; i++)
 	{
 		FontGlyph? g = FontGlyph::lookup_field(ch, (char)i);
 		if (catch g) continue;
@@ -566,7 +566,7 @@ fn void handle_mouse_release(GfxPoint m)
 			state.selected_track_idx = hovered;
 			state.selection_anchor_idx = hovered;
 
-			if (hovered == state.last_clicked_idx && (now - state.last_click_time) < 0.35)
+			if (hovered == state.last_clicked_idx && (now - state.last_click_time) < DOUBLE_CLICK_TIMEOUT_SEC)
 			{
 				play_track_index(hovered);
 				state.last_click_time = 0.0;
@@ -627,7 +627,7 @@ fn void draw_ui(GfxSize win_sz, GfxPoint cur_m, UiLayout* layout)
 	int current_idx = playlist_get_current_index();
 
 	draw_rect(win_sz, layout.timeline_bar, { 0.15f, 0.17f, 0.2f, 1.0f });
-	if (current_idx >= 0 && current_idx < count)
+	if (current_idx >= 0 && current_idx < (int)state.playlist.len())
 	{
 		PlaylistItem cur_item = state.playlist[current_idx];
 		ulong total_f = state.audio.is_track_loaded ? state.audio.track_frames : cur_item.total_frames;
@@ -638,8 +638,8 @@ fn void draw_ui(GfxSize win_sz, GfxPoint cur_m, UiLayout* layout)
 			draw_rect(win_sz, time_fill, { 0.25f, 0.7f, 0.95f, 1.0f });
 		}
 
-		float cur_s = state.audio.is_track_loaded ? (float)state.audio.track_cursor / 48000.0f : 0.0f;
-		float tot_s = (float)total_f / 48000.0f;
+		float cur_s = state.audio.is_track_loaded ? (float)state.audio.track_cursor / AUDIO_SAMPLE_RATE : 0.0f;
+		float tot_s = (float)total_f / AUDIO_SAMPLE_RATE;
 		String time_str = string::tformat("%02d:%02d / %02d:%02d", (int)cur_s / 60, (int)cur_s % 60, (int)tot_s / 60, (int)tot_s % 60);
 		draw_text(win_sz, time_str, layout.status_text.x, layout.status_text.y, 14, { 0.8f, 0.8f, 0.8f, 1.0f });
 
@@ -647,7 +647,7 @@ fn void draw_ui(GfxSize win_sz, GfxPoint cur_m, UiLayout* layout)
 		String title_str = string::tformat(prefix, ((ZString)&cur_item.name[0]).str_view());
 
 		int time_end_x = layout.status_text.x + (int)time_str.len * 6 + 16;
-		int title_w = (int)title_str.len * 6;
+		int title_w = (int)title_str.utf8_codepoints() * 6;
 		int centered_x = win_sz.x / 2 - title_w / 2;
 		int title_x = math::max(time_end_x, centered_x);
 
@@ -783,7 +783,7 @@ fn void draw_ui(GfxSize win_sz, GfxPoint cur_m, UiLayout* layout)
 	if (state.is_dragging_item && state.drag_active)
 	{
 		int sel_count = 0;
-		for (int i = 0; i < count; i++)
+		for (int i = 0; i < (int)state.playlist.len(); i++)
 		{
 			if (state.playlist[i].selected) sel_count++;
 		}
@@ -793,7 +793,7 @@ fn void draw_ui(GfxSize win_sz, GfxPoint cur_m, UiLayout* layout)
 		{
 			badge_str = string::tformat("Moving %d tracks", sel_count);
 		}
-		else if (state.drag_source_idx >= 0 && state.drag_source_idx < count)
+		else if (state.drag_source_idx >= 0 && state.drag_source_idx < (int)state.playlist.len())
 		{
 			PlaylistItem src_item = state.playlist[state.drag_source_idx];
 			badge_str = string::tformat("Moving: %s", ((ZString)&src_item.name[0]).str_view());
@@ -826,7 +826,7 @@ fn void draw_ui(GfxSize win_sz, GfxPoint cur_m, UiLayout* layout)
 
 		if (count == 0)
 		{
-			draw_text(win_sz, "(NO MATCHES)", UI_MARGIN + 8 + (int)search_label.len * 6 + 12, bar_y + 3, 14, { 0.85f, 0.35f, 0.35f, 1.0f });
+			draw_text(win_sz, "(NO MATCHES)", UI_MARGIN + 8 + (int)search_label.utf8_codepoints() * 6 + 12, bar_y + 3, 14, { 0.85f, 0.35f, 0.35f, 1.0f });
 		}
 	}
 
