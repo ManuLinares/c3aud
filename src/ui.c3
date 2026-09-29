@@ -214,6 +214,30 @@ fn void draw_icon_in_rect(GfxSize win_sz, int slot, IntRect r, float size, Vec4 
 	draw_icon(win_sz, slot, (float)(r.x + r.width / 2), (float)(r.y + r.height / 2), size, color);
 }
 
+fn void draw_transport_button(GfxSize win_sz, GfxPoint mouse, IntRect rect, int icon_slot, bool active, bool has_indicator, float size = 28.0f)
+{
+	bool hovered = rect.contains_point(mouse);
+	Vec4 col;
+	if (active)
+	{
+		col = { 0.20f, 0.85f, 0.55f, 1.0f };
+	}
+	else if (hovered)
+	{
+		col = { 1.0f, 1.0f, 1.0f, 1.0f };
+	}
+	else
+	{
+		col = { 0.65f, 0.68f, 0.72f, 1.0f };
+	}
+
+	draw_icon_in_rect(win_sz, icon_slot, rect, size, col);
+	if (has_indicator && active)
+	{
+		draw_rect_px(win_sz, rect.x + rect.width / 2 - 2, rect.y + rect.height / 2 + 12, 4, 3, col);
+	}
+}
+
 const String SHADER_PREFIX @feat(EMSCRIPTEN | WASM)   = "#version 300 es\nprecision highp float;\n";
 const String SHADER_PREFIX @feat(!EMSCRIPTEN & !WASM) = "#version 330 core\n";
 
@@ -325,33 +349,30 @@ fn void init_font()
 	state.text_verts.init(mem, 8192);
 }
 
-fn void handle_timeline_drag(GfxPoint m)
+fn void handle_timeline_drag(GfxPoint m, UiLayout* layout)
 {
 	if (!state.audio.is_track_loaded) return;
-	UiLayout layout = compute_layout(state.win.get_size());
 	if (layout.content_w <= 0) return;
 
 	if (m.x != state.last_seek_mouse_x)
 	{
 		state.last_seek_mouse_x = m.x;
 		float frac = layout.timeline_frac(m.x);
-		audio_seek_absolute((ulong)(frac * (float)state.audio.track_frames));
+		state.audio.seek_absolute((ulong)(frac * (float)state.audio.track_frames));
 	}
 }
 
-fn void handle_volume_drag(GfxPoint m)
+fn void handle_volume_drag(GfxPoint m, UiLayout* layout)
 {
-	UiLayout layout = compute_layout(state.win.get_size());
 	state.audio.volume = layout.volume_frac(m.x);
 }
 
-fn void handle_scrollbar_drag(GfxPoint m)
+fn void handle_scrollbar_drag(GfxPoint m, UiLayout* layout)
 {
-	UiLayout layout = compute_layout(state.win.get_size());
 	state.scroll_row = layout.scrollbar_scroll_row(m.y, state.scrollbar_drag_offset, playlist_view_count());
 }
 
-fn void handle_item_drag(GfxPoint m)
+fn void handle_item_drag(GfxPoint m, UiLayout* layout)
 {
 	if (!state.is_dragging_item || state.filter_active) return;
 	int dx = m.x - state.drag_start_pos.x;
@@ -362,7 +383,6 @@ fn void handle_item_drag(GfxPoint m)
 	}
 	if (state.drag_active)
 	{
-		UiLayout layout = compute_layout(state.win.get_size());
 		state.drag_target_idx = layout.drag_target_index(m.y, state.scroll_row, (int)state.playlist.len());
 	}
 }
@@ -380,13 +400,11 @@ fn void toggle_playback()
 		}
 		return;
 	}
-	audio_toggle();
+	state.audio.toggle();
 }
 
-fn void handle_mouse_click(GfxPoint m, bool left, bool middle)
+fn void handle_mouse_click(GfxPoint m, bool left, bool middle, UiLayout* layout)
 {
-	GfxSize win_sz = state.win.get_size();
-	UiLayout layout = compute_layout(win_sz);
 	int count = playlist_view_count();
 
 	int hovered = -1;
@@ -407,7 +425,7 @@ fn void handle_mouse_click(GfxPoint m, bool left, bool middle)
 		if (layout.volume_hit.contains_point(m))
 		{
 			state.is_dragging_volume = true;
-			handle_volume_drag(m);
+			handle_volume_drag(m, layout);
 			return;
 		}
 
@@ -430,7 +448,7 @@ fn void handle_mouse_click(GfxPoint m, bool left, bool middle)
 		{
 			state.is_dragging_timeline = true;
 			state.last_seek_mouse_x = -1;
-			handle_timeline_drag(m);
+			handle_timeline_drag(m, layout);
 			return;
 		}
 
@@ -472,7 +490,7 @@ fn void handle_mouse_click(GfxPoint m, bool left, bool middle)
 			else
 			{
 				state.scrollbar_drag_offset = thumb.height / 2;
-				handle_scrollbar_drag(m);
+				handle_scrollbar_drag(m, layout);
 			}
 			return;
 		}
@@ -501,7 +519,7 @@ fn void handle_mouse_click(GfxPoint m, bool left, bool middle)
 					state.playlist[i].selected = false;
 				}
 				int start_sel = math::min(state.selection_anchor_idx, hovered);
-				int end_sel = math::max(state.selection_anchor_idx, hovered);
+				int end_sel   = math::max(state.selection_anchor_idx, hovered);
 				for (int i = start_sel; i <= end_sel; i++)
 				{
 					state.playlist[i].selected = true;
@@ -644,7 +662,7 @@ fn void draw_ui(GfxSize win_sz, GfxPoint cur_m, UiLayout* layout)
 		draw_text(win_sz, time_str, layout.status_text.x, layout.status_text.y, 14, { 0.8f, 0.8f, 0.8f, 1.0f });
 
 		String prefix = state.audio.is_playing ? "NOW PLAYING: %s" : "TRACK: %s";
-		String title_str = string::tformat(prefix, ((ZString)&cur_item.name[0]).str_view());
+		String title_str = string::tformat(prefix, cur_item.name_view());
 
 		int time_end_x = layout.status_text.x + (int)time_str.len * 6 + 16;
 		int title_w = (int)title_str.utf8_codepoints() * 6;
@@ -657,34 +675,16 @@ fn void draw_ui(GfxSize win_sz, GfxPoint cur_m, UiLayout* layout)
 
 	draw_rect(win_sz, layout.controls_box, { 0.08f, 0.09f, 0.11f, 0.85f });
 
-	bool shuf_hov = layout.btn_shuffle.contains_point(cur_m);
-	bool prev_hov = layout.btn_prev.contains_point(cur_m);
+	draw_transport_button(win_sz, cur_m, layout.btn_shuffle, ICON_SHUF, state.shuffle_mode, true);
+	draw_transport_button(win_sz, cur_m, layout.btn_prev,    ICON_PREV, false, false);
+
 	bool play_hov = layout.btn_play.contains_point(cur_m);
-	bool next_hov = layout.btn_next.contains_point(cur_m);
-	bool rep_hov  = layout.btn_repeat.contains_point(cur_m);
-
-	// 1. Shuffle
-	Vec4 shuf_col = state.shuffle_mode ? (Vec4){ 0.20f, 0.85f, 0.55f, 1.0f } : (shuf_hov ? (Vec4){ 1.0f, 1.0f, 1.0f, 1.0f } : (Vec4){ 0.65f, 0.68f, 0.72f, 1.0f });
-	draw_icon_in_rect(win_sz, ICON_SHUF, layout.btn_shuffle, 28.0f, shuf_col);
-	if (state.shuffle_mode) draw_rect_px(win_sz, layout.btn_shuffle.x + layout.btn_shuffle.width / 2 - 2, layout.btn_shuffle.y + layout.btn_shuffle.height / 2 + 12, 4, 3, shuf_col);
-
-	// 2. Previous
-	Vec4 prev_col = prev_hov ? (Vec4){ 1.0f, 1.0f, 1.0f, 1.0f } : (Vec4){ 0.80f, 0.82f, 0.86f, 1.0f };
-	draw_icon_in_rect(win_sz, ICON_PREV, layout.btn_prev, 28.0f, prev_col);
-
-	// 3. Play / Pause
 	Vec4 circ_col = play_hov ? (Vec4){ 1.0f, 1.0f, 1.0f, 1.0f } : (Vec4){ 0.92f, 0.93f, 0.95f, 1.0f };
 	int play_slot = state.audio.is_playing ? ICON_PAUSE : ICON_PLAY;
 	draw_icon_in_rect(win_sz, play_slot, layout.btn_play, PLAY_RADIUS * 2.0f, circ_col);
 
-	// 4. Next
-	Vec4 next_col = next_hov ? (Vec4){ 1.0f, 1.0f, 1.0f, 1.0f } : (Vec4){ 0.80f, 0.82f, 0.86f, 1.0f };
-	draw_icon_in_rect(win_sz, ICON_NEXT, layout.btn_next, 28.0f, next_col);
-
-	// 5. Repeat
-	Vec4 rep_col = state.repeat_mode ? (Vec4){ 0.20f, 0.85f, 0.55f, 1.0f } : (rep_hov ? (Vec4){ 1.0f, 1.0f, 1.0f, 1.0f } : (Vec4){ 0.65f, 0.68f, 0.72f, 1.0f });
-	draw_icon_in_rect(win_sz, ICON_REP, layout.btn_repeat, 28.0f, rep_col);
-	if (state.repeat_mode) draw_rect_px(win_sz, layout.btn_repeat.x + layout.btn_repeat.width / 2 - 2, layout.btn_repeat.y + layout.btn_repeat.height / 2 + 12, 4, 3, rep_col);
+	draw_transport_button(win_sz, cur_m, layout.btn_next,   ICON_NEXT, false, false);
+	draw_transport_button(win_sz, cur_m, layout.btn_repeat, ICON_REP,  state.repeat_mode, true);
 
 	draw_text(win_sz, "PLAYLIST", layout.playlist_label.x, layout.playlist_label.y, 14, { 0.7f, 0.75f, 0.8f, 1.0f });
 
@@ -730,26 +730,21 @@ fn void draw_ui(GfxSize win_sz, GfxPoint cur_m, UiLayout* layout)
 		bool is_selected = item.selected;
 		bool is_hovered  = (real_idx == state.hovered_track_idx);
 
-		Vec4 bg_col = { 0.12f, 0.14f, 0.17f, 1.0f };
-		if (state.is_dragging_item && state.drag_active && is_selected)
+		Vec4 bg_col;
+		switch
 		{
-			bg_col = { 0.28f, 0.38f, 0.48f, 0.8f };
-		}
-		else if (is_current && is_selected)
-		{
-			bg_col = state.audio.is_playing ? (Vec4){ 0.24f, 0.38f, 0.44f, 1.0f } : (Vec4){ 0.18f, 0.28f, 0.34f, 1.0f };
-		}
-		else if (is_current)
-		{
-			bg_col = state.audio.is_playing ? (Vec4){ 0.18f, 0.28f, 0.22f, 1.0f } : (Vec4){ 0.13f, 0.20f, 0.16f, 1.0f };
-		}
-		else if (is_selected)
-		{
-			bg_col = { 0.20f, 0.28f, 0.38f, 1.0f };
-		}
-		else if (is_hovered)
-		{
-			bg_col = { 0.16f, 0.19f, 0.23f, 1.0f };
+			case state.is_dragging_item && state.drag_active && is_selected:
+				bg_col = { 0.28f, 0.38f, 0.48f, 0.8f };
+			case is_current && is_selected:
+				bg_col = state.audio.is_playing ? (Vec4){ 0.24f, 0.38f, 0.44f, 1.0f } : (Vec4){ 0.18f, 0.28f, 0.34f, 1.0f };
+			case is_current:
+				bg_col = state.audio.is_playing ? (Vec4){ 0.18f, 0.28f, 0.22f, 1.0f } : (Vec4){ 0.13f, 0.20f, 0.16f, 1.0f };
+			case is_selected:
+				bg_col = { 0.20f, 0.28f, 0.38f, 1.0f };
+			case is_hovered:
+				bg_col = { 0.16f, 0.19f, 0.23f, 1.0f };
+			default:
+				bg_col = { 0.12f, 0.14f, 0.17f, 1.0f };
 		}
 
 		draw_rect(win_sz, r, bg_col);
@@ -769,7 +764,7 @@ fn void draw_ui(GfxSize win_sz, GfxPoint cur_m, UiLayout* layout)
 
 		int max_name_w = math::max(0, r.width - (ITEM_NAME_X + ITEM_DUR_W + ITEM_NAME_GAP));
 		draw_text(win_sz, num_str, r.x + ITEM_NUM_X, r.y + ITEM_TEXT_Y, 14, text_col);
-		draw_text(win_sz, ((ZString)&item.name[0]).str_view(), r.x + ITEM_NAME_X, r.y + ITEM_TEXT_Y, 14, text_col, max_name_w, ITEM_NAME_FADE_W);
+		draw_text(win_sz, item.name_view(), r.x + ITEM_NAME_X, r.y + ITEM_TEXT_Y, 14, text_col, max_name_w, ITEM_NAME_FADE_W);
 		draw_text(win_sz, ((ZString)&item.dur_str[0]).str_view(), r.x + r.width - ITEM_DUR_W, r.y + ITEM_TEXT_Y, 14, { 0.6f, 0.65f, 0.7f, 1.0f });
 	}
 
@@ -809,7 +804,7 @@ fn void draw_ui(GfxSize win_sz, GfxPoint cur_m, UiLayout* layout)
 		else if (state.drag_source_idx >= 0 && state.drag_source_idx < (int)state.playlist.len())
 		{
 			PlaylistItem src_item = state.playlist[state.drag_source_idx];
-			badge_str = string::tformat("Moving: %s", ((ZString)&src_item.name[0]).str_view());
+			badge_str = string::tformat("Moving: %s", src_item.name_view());
 		}
 		else
 		{

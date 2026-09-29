@@ -1,14 +1,35 @@
 module c3aud;
-import std;
+import std, tray;
+
+const sz MAX_TRACK_NAME_BYTES = 256;
 
 struct PlaylistItem
 {
 	uint token;
 	String path;
-	char[128] name;
+	char[MAX_TRACK_NAME_BYTES] name;
 	ulong total_frames;
 	char[8] dur_str;
 	bool selected;
+}
+
+fn String PlaylistItem.name_view(&self) => ((ZString)&self.name[0]).str_view();
+
+fn void PlaylistItem.destroy(&self)
+{
+	if (self.token == state.audio.loaded_token)
+	{
+		state.audio.unload();
+	}
+	if (self.total_frames == 0)
+	{
+		state.unprobed_count--;
+	}
+	if (self.path.ptr != null)
+	{
+		mem::free(self.path.ptr);
+		self.path = "";
+	}
 }
 
 fn void set_playlist_item_frames(PlaylistItem* item, ulong frames)
@@ -89,21 +110,10 @@ fn char fold_char(Char32 cp)
 fn sz fold_string(char[] out, String in)
 {
 	sz out_len = 0;
-	sz i = 0;
-	while (i < in.len && out_len < out.len)
+	StringIterator it = in.iterator();
+	while (try cp = it.next())
 	{
-		sz width = in.len - i;
-		Char32 cp = in[i];
-		if (try decoded = conv::utf8_to_char32(&in[i], &width))
-		{
-			cp = decoded;
-		}
-		else
-		{
-			width = 1;
-		}
-		i += width;
-
+		if (out_len >= out.len) break;
 		char fc = fold_char(cp);
 		if (fc != 0) out[out_len++] = fc;
 	}
@@ -114,7 +124,7 @@ fn bool filter_match_name(String text, String pattern)
 {
 	if (pattern.len == 0) return true;
 
-	char[128] f_text;
+	char[MAX_TRACK_NAME_BYTES] f_text;
 	sz t_len = fold_string(&f_text, text);
 
 	char[64] f_pat;
@@ -131,8 +141,7 @@ fn void filter_apply()
 
 	for (int i = 0; i < (int)state.playlist.len(); i++)
 	{
-		String name = ((ZString)&state.playlist[i].name[0]).str_view();
-		if (filter_match_name(name, pattern))
+		if (filter_match_name(state.playlist[i].name_view(), pattern))
 		{
 			state.filtered_indices.push(i);
 		}
@@ -207,10 +216,8 @@ fn void ensure_track_visible(int idx)
 	}
 }
 
-fn int playlist_drop_target_index(GfxPoint m)
+fn int playlist_drop_target_index(GfxPoint m, UiLayout* layout)
 {
-	GfxSize win_sz = state.win.get_size();
-	UiLayout layout = compute_layout(win_sz);
 	int count = playlist_view_count();
 
 	if (count > 0 && layout.playlist_area.contains_point(m))
@@ -260,70 +267,28 @@ fn void rebuild_shuffle_order()
 	}
 }
 
+const String[*] AUDIO_EXTS = {
+	"3ga",  "3gp",  "aac", "ac3",  "aif",  "aifc", "aiff", "alac", "amr",  "ape",
+	"asf",  "au",   "avi", "dts",  "flac", "flv",  "m2ts", "m4a",  "m4b",  "m4p",
+	"m4r",  "m4v",  "mid", "midi", "mka",  "mkv",  "mov",  "mp2",  "mp3",  "mp4",
+	"mpc",  "mpeg", "mpg", "oga",  "ogg",  "ogv",  "opus", "ra",   "ram",  "rm",
+	"rmvb", "spx",  "tak", "ts",   "tta",  "vob",  "voc",  "wav",  "webm", "wma",
+	"wmv",  "wv"
+};
+
 fn bool is_supported_audio_extension(String path) => @pool()
 {
 	String? ext = ((Path)path).extension();
 	if (catch ext) return false;
 	if (ext.len == 0 || ext.len > 8) return false;
 
-	switch (ext.to_lower_tcopy())
-	{
-		case "3ga":
-		case "3gp":
-		case "aac":
-		case "ac3":
-		case "aif":
-		case "aifc":
-		case "aiff":
-		case "alac":
-		case "amr":
-		case "ape":
-		case "asf":
-		case "au":
-		case "avi":
-		case "dts":
-		case "flac":
-		case "flv":
-		case "m2ts":
-		case "m4a":
-		case "m4b":
-		case "m4p":
-		case "m4r":
-		case "m4v":
-		case "mid":
-		case "midi":
-		case "mka":
-		case "mkv":
-		case "mov":
-		case "mp2":
-		case "mp3":
-		case "mp4":
-		case "mpc":
-		case "mpeg":
-		case "mpg":
-		case "oga":
-		case "ogg":
-		case "ogv":
-		case "opus":
-		case "ra":
-		case "ram":
-		case "rm":
-		case "rmvb":
-		case "spx":
-		case "tak":
-		case "ts":
-		case "tta":
-		case "vob":
-		case "voc":
-		case "wav":
-		case "webm":
-		case "wma":
-		case "wmv":
-		case "wv":
-			return true;
-		default:
-			return false;
-	}
+	String lower_ext = ext.to_lower_tcopy();
+	var $code = "switch (lower_ext) {";
+	$foreach $e : AUDIO_EXTS:
+		$code = $code +++ " case \"" +++ $e +++ "\":";
+	$endforeach
+	$code = $code +++ " return true; default: return false; }";
+	$expand($code);
 }
 
 fn void probe_next_track_metadata(Time deadline) => @pool()
@@ -351,7 +316,7 @@ fn void probe_next_track_metadata(Time deadline) => @pool()
 			{
 				state.playlist[idx].name = inf.display_name;
 			}
-			log::info("Probed [%d] '%s' -> '%s' (%d frames)", state.playlist[idx].token, state.playlist[idx].path, (ZString)&state.playlist[idx].name[0], state.playlist[idx].total_frames, category: log::CATEGORY_APPLICATION);
+			log::info("Probed [%d] '%s' -> '%s' (%d frames)", state.playlist[idx].token, state.playlist[idx].path, state.playlist[idx].name_view(), state.playlist[idx].total_frames, category: log::CATEGORY_APPLICATION);
 		}
 		else
 		{
@@ -415,13 +380,13 @@ fn bool add_file_to_playlist(String raw_path, int insert_idx) => @pool()
 	item.dur_str = "--:--\0\0";
 	item.selected = false;
 
-	sz copy_len = math::min(name_view.len, (sz)127);
+	sz copy_len = math::min(name_view.len, MAX_TRACK_NAME_BYTES - 1);
 	item.name[:copy_len] = name_view[:copy_len];
 
 	sz pos = math::clamp(insert_idx, 0, (int)state.playlist.len());
 	state.playlist.insert_at(pos, item);
 	state.unprobed_count++;
-	log::info("Added item: '%s' (token: %d, index: %d)", (ZString)&item.name[0], item.token, (int)pos, category: log::CATEGORY_APPLICATION);
+	log::info("Added item: '%s' (token: %d, index: %d)", item.name_view(), item.token, (int)pos, category: log::CATEGORY_APPLICATION);
 
 	if (state.probe_cursor > (int)pos)
 	{
@@ -440,7 +405,7 @@ fn bool play_track_index(int idx)
 	if (idx < 0 || idx >= state.playlist.len()) return false;
 
 	PlaylistItem item = state.playlist[idx];
-	if (!audio_play_file(item.token, item.path)) return false;
+	if (!state.audio.play_file(item.token, item.path)) return false;
 
 	if (state.playlist[idx].total_frames == 0)
 	{
@@ -463,6 +428,7 @@ fn bool play_track_index(int idx)
 		}
 	}
 	ensure_track_visible(idx);
+	tray::update_tooltip("c3aud", state.playlist[idx].name_view());
 	return true;
 }
 
@@ -494,7 +460,7 @@ fn void play_next_track()
 		if (play_track_index(target_idx)) return;
 	}
 
-	audio_unload();
+	state.audio.unload();
 }
 
 fn void playlist_select_single(int idx)
@@ -571,7 +537,7 @@ fn void play_prev_track()
 
 	if (state.audio.is_track_loaded && state.audio.track_cursor > PREV_TRACK_REWIND_THRESHOLD_FRAMES)
 	{
-		audio_seek_absolute(0);
+		state.audio.seek_absolute(0);
 		return;
 	}
 
@@ -591,98 +557,17 @@ fn void play_prev_track()
 	play_track_index(prev_idx);
 }
 
-fn void remove_track(int idx)
+fn void playlist_post_mutation_sync()
 {
-	if (idx < 0 || idx >= state.playlist.len()) return;
-
-	PlaylistItem item = state.playlist[idx];
-	if (item.token == state.audio.loaded_token)
-	{
-		audio_unload();
-	}
-	if (item.total_frames == 0)
-	{
-		state.unprobed_count--;
-	}
-	mem::free(item.path.ptr);
-	state.playlist.remove_at((sz)idx);
-
 	int remaining = (int)state.playlist.len();
 	if (remaining == 0)
 	{
-		audio_unload();
+		state.audio.unload();
 		state.selected_track_idx = -1;
 		state.selection_anchor_idx = -1;
 		state.scroll_row = 0;
 		if (state.shuffle_mode) rebuild_shuffle_order();
-		return;
-	}
-
-	int cur = playlist_get_current_index();
-	state.selected_track_idx = (cur >= 0) ? cur : math::clamp(idx, 0, remaining - 1);
-	state.selection_anchor_idx = state.selected_track_idx;
-
-	GfxSize win_sz = state.win.get_size();
-	UiLayout layout = compute_layout(win_sz);
-	state.scroll_row = math::clamp(state.scroll_row, 0, layout.max_scroll(remaining));
-	if (state.shuffle_mode) rebuild_shuffle_order();
-	if (state.filter_active) filter_apply();
-}
-
-fn void remove_selected_tracks()
-{
-	int count = (int)state.playlist.len();
-	if (count == 0) return;
-
-	bool any_selected = array::@any(state.playlist.array_view(), fn bool (PlaylistItem item, sz i) => item.selected);
-
-	if (!any_selected)
-	{
-		if (state.selected_track_idx >= 0 && state.selected_track_idx < count)
-		{
-			remove_track(state.selected_track_idx);
-		}
-		return;
-	}
-
-	int write = 0;
-	for (int read = 0; read < count; read++)
-	{
-		if (state.playlist[read].selected)
-		{
-			if (state.playlist[read].token == state.audio.loaded_token)
-			{
-				audio_unload();
-			}
-			if (state.playlist[read].total_frames == 0)
-			{
-				state.unprobed_count--;
-			}
-			mem::free(state.playlist[read].path.ptr);
-		}
-		else
-		{
-			if (write != read)
-			{
-				state.playlist[write] = state.playlist[read];
-			}
-			write++;
-		}
-	}
-
-	while (state.playlist.len() > (sz)write)
-	{
-		(void)state.playlist.pop();
-	}
-
-	int remaining = (int)state.playlist.len();
-	if (remaining == 0)
-	{
-		audio_unload();
-		state.selected_track_idx = -1;
-		state.selection_anchor_idx = -1;
-		state.scroll_row = 0;
-		if (state.shuffle_mode) rebuild_shuffle_order();
+		if (state.filter_active) filter_apply();
 		return;
 	}
 
@@ -696,6 +581,37 @@ fn void remove_selected_tracks()
 	state.scroll_row = math::clamp(state.scroll_row, 0, layout.max_scroll(remaining));
 	if (state.shuffle_mode) rebuild_shuffle_order();
 	if (state.filter_active) filter_apply();
+}
+
+fn void remove_track(int idx)
+{
+	if (idx < 0 || idx >= state.playlist.len()) return;
+	state.playlist[idx].destroy();
+	state.playlist.remove_at((sz)idx);
+	playlist_post_mutation_sync();
+}
+
+fn void remove_selected_tracks()
+{
+	int count = (int)state.playlist.len();
+	if (count == 0) return;
+
+	if (!array::@any(state.playlist.array_view(), fn bool (PlaylistItem item, sz i) => item.selected))
+	{
+		if (state.selected_track_idx >= 0 && state.selected_track_idx < count)
+		{
+			remove_track(state.selected_track_idx);
+		}
+		return;
+	}
+
+	state.playlist.remove_if(fn bool (PlaylistItem* item) {
+		if (!item.selected) return false;
+		item.destroy();
+		return true;
+	});
+
+	playlist_post_mutation_sync();
 }
 
 fn void reorder_selected_tracks(int target_idx) => @pool()

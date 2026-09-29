@@ -39,35 +39,21 @@ fn void draw_text(GfxSize win_sz, String text, int x, int y, int size, Vec4 colo
 	char[4] base_col = pack_color(color);
 
 	sz needed = text.len * 6;
-	state.text_verts.reserve(needed);
-
-	TextVertex* v = &state.text_verts.entries[state.text_verts.size];
+	TextVertex[] tmp = mem::talloc_array(TextVertex, needed);
+	TextVertex* v = &tmp[0];
 	sz count = 0;
 
-	for (sz si = 0; si < text.len; )
+	StringIterator it = text.iterator();
+	while (try cp = it.next())
 	{
-		char c = text[si];
-		if (c == '\n')
+		if (cp == '\n')
 		{
 			cur_x = (float)x;
 			cur_y += 10.0f * scale;
-			si++;
 			continue;
 		}
 
 		if (max_w > 0 && cur_x >= limit_x) break;
-
-		sz width = text.len - si;
-		Char32 cp = c;
-		if (try decoded = conv::utf8_to_char32(&text[si], &width))
-		{
-			cp = decoded;
-		}
-		else
-		{
-			width = 1;
-		}
-		si += width;
 
 		if (cp < 32 || cp > 255)
 		{
@@ -117,7 +103,7 @@ fn void draw_text(GfxSize win_sz, String text, int x, int y, int size, Vec4 colo
 		cur_x += advance;
 	}
 
-	state.text_verts.size += count;
+	state.text_verts.push_all(tmp[:count]);
 }
 
 fn void flush_text()

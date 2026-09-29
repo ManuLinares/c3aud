@@ -1,5 +1,5 @@
 module c3aud;
-import std, miniaudio::ma, avutil;
+import std, miniaudio::ma, avutil, tray;
 
 const String WINDOW_TITLE    = "C3 Audio Station";
 const int WINDOW_WIDTH       = 760;
@@ -94,6 +94,8 @@ fn void on_repaint(GfxWindow* w, GfxRect rect) => @pool()
 
 fn void dispatch_event(GfxEvent* e)
 {
+	UiLayout layout = compute_layout(state.win.get_size());
+
 	switch (e.type)
 	{
 		case WINDOW_RESIZED:
@@ -129,17 +131,17 @@ fn void dispatch_event(GfxEvent* e)
 				case DOWN:
 					playlist_move_selection(1, shift);
 				case PAGE_UP:
-					playlist_move_selection(-compute_layout(state.win.get_size()).visible_rows, shift);
+					playlist_move_selection(-layout.visible_rows, shift);
 				case PAGE_DOWN:
-					playlist_move_selection(compute_layout(state.win.get_size()).visible_rows, shift);
+					playlist_move_selection(layout.visible_rows, shift);
 				case HOME:
 					playlist_move_selection(-(int)state.playlist.len(), shift);
 				case END:
 					playlist_move_selection((int)state.playlist.len(), shift);
 				case LEFT:
-					audio_seek_relative(-SEEK_STEP_SEC);
+					state.audio.seek_relative(-SEEK_STEP_SEC);
 				case RIGHT:
-					audio_seek_relative(SEEK_STEP_SEC);
+					state.audio.seek_relative(SEEK_STEP_SEC);
 				case DELETE:
 					remove_selected_tracks();
 				case F11:
@@ -162,25 +164,23 @@ fn void dispatch_event(GfxEvent* e)
 		case MOUSE_SCROLL:
 			float dir = math::copysign(1.0f, e.delta.vector.y);
 			GfxPoint m = state.win.get_mouse();
-			GfxSize win_sz = state.win.get_size();
-			UiLayout layout = compute_layout(win_sz);
 
 			switch
 			{
 				case layout.volume_hit.contains_point(m):
 					state.audio.volume = math::clamp(state.audio.volume + dir * 0.05f, 0.0f, 1.0f);
 				case layout.timeline_hit.contains_point(m):
-					audio_seek_relative(dir * SEEK_STEP_SEC);
+					state.audio.seek_relative(dir * SEEK_STEP_SEC);
 				default:
 					int max_s = layout.max_scroll(playlist_view_count());
 					state.scroll_row = math::clamp(state.scroll_row - (int)(dir * 3.0f), 0, max_s);
 			}
 
 		case MOUSE_MOTION:
-			if (state.is_dragging_timeline)  handle_timeline_drag(e.mouse.pos);
-			if (state.is_dragging_volume)    handle_volume_drag(e.mouse.pos);
-			if (state.is_dragging_scrollbar) handle_scrollbar_drag(e.mouse.pos);
-			if (state.is_dragging_item)      handle_item_drag(e.mouse.pos);
+			if (state.is_dragging_timeline)  handle_timeline_drag(e.mouse.pos, &layout);
+			if (state.is_dragging_volume)    handle_volume_drag(e.mouse.pos, &layout);
+			if (state.is_dragging_scrollbar) handle_scrollbar_drag(e.mouse.pos, &layout);
+			if (state.is_dragging_item)      handle_item_drag(e.mouse.pos, &layout);
 
 		case DATA_DRAG:
 			if (e.drag.action == EXIT)
@@ -189,13 +189,13 @@ fn void dispatch_event(GfxEvent* e)
 			}
 			else
 			{
-				state.drop_insert_idx = playlist_drop_target_index(e.drag.pos);
+				state.drop_insert_idx = playlist_drop_target_index(e.drag.pos, &layout);
 			}
 
 		case DATA_DROP:
 			if (state.drop_insert_idx < 0)
 			{
-				state.drop_insert_idx = playlist_drop_target_index(state.win.get_mouse());
+				state.drop_insert_idx = playlist_drop_target_index(state.win.get_mouse(), &layout);
 			}
 
 			if (state.filter_active)
@@ -225,7 +225,7 @@ fn void dispatch_event(GfxEvent* e)
 			}
 
 		case MOUSE_BUTTON_PRESSED:
-			handle_mouse_click(state.win.get_mouse(), e.button.value == LEFT, e.button.value == MIDDLE);
+			handle_mouse_click(state.win.get_mouse(), e.button.value == LEFT, e.button.value == MIDDLE, &layout);
 
 		case MOUSE_BUTTON_RELEASED:
 			if (e.button.value == LEFT)
@@ -275,6 +275,30 @@ fn void main(String[] args) @winmain
 		{
 			@pool()
 			{
+				TrayEvent tev;
+				while (tray::poll_event(&tev))
+				{
+					switch (tev.action)
+					{
+						case TOGGLE_WINDOW:
+							state.win.is_hidden() ? state.win.show() : state.win.hide();
+						case TOGGLE_PLAYBACK:
+							toggle_playback();
+							on_repaint(state.win, state.win.bounds);
+						case PREV_TRACK:
+							play_prev_track();
+						case NEXT_TRACK:
+							play_next_track();
+						case QUIT:
+							state.win.set_should_close(true);
+						case VOLUME_CHANGE:
+							state.audio.volume = math::clamp(state.audio.volume + (float)tev.scroll_delta * 0.05f, 0.0f, 1.0f);
+							on_repaint(state.win, state.win.bounds);
+						default:
+							break;
+					}
+				}
+
 				bool visible = !state.win.is_minimized() && !state.win.is_hidden() && state.win.width > 0 && state.win.height > 0;
 				bool needs_background_work = state.unprobed_count > 0;
 
@@ -284,7 +308,7 @@ fn void main(String[] args) @winmain
 						Time start_time = time::now();
 						Time deadline = start_time + FRAME_DURATION;
 
-						while (try ev = gfx::poll(state.win))
+						while (try ev = gfx::poll())
 						{
 							dispatch_event(&ev);
 						}
@@ -308,7 +332,7 @@ fn void main(String[] args) @winmain
 						Time start_time = time::now();
 						Time deadline = start_time + BG_PROBE_BUDGET;
 
-						while (try ev = gfx::poll(state.win))
+						while (try ev = gfx::poll())
 						{
 							dispatch_event(&ev);
 						}
@@ -323,7 +347,7 @@ fn void main(String[] args) @winmain
 						if (try ev = gfx::wait(gfx::WAIT_FOREVER))
 						{
 							dispatch_event(&ev);
-							while (try queued = gfx::poll(state.win))
+							while (try queued = gfx::poll())
 							{
 								dispatch_event(&queued);
 							}
@@ -341,8 +365,6 @@ fn void main(String[] args) @winmain
 
 fn void step_web() => @pool()
 {
-	// not finished :(
-
 	while (try ev = gfx::poll(state.win))
 	{
 		dispatch_event(&ev);
@@ -352,30 +374,50 @@ fn void step_web() => @pool()
 		state.audio.track_eof = false;
 		play_next_track();
 	}
-	if (state.is_dragging_timeline)  handle_timeline_drag(state.win.get_mouse());
-	if (state.is_dragging_volume)    handle_volume_drag(state.win.get_mouse());
-	if (state.is_dragging_scrollbar) handle_scrollbar_drag(state.win.get_mouse());
-	if (state.is_dragging_item)      handle_item_drag(state.win.get_mouse());
+	UiLayout layout = compute_layout(state.win.get_size());
+	if (state.is_dragging_timeline)  handle_timeline_drag(state.win.get_mouse(), &layout);
+	if (state.is_dragging_volume)    handle_volume_drag(state.win.get_mouse(), &layout);
+	if (state.is_dragging_scrollbar) handle_scrollbar_drag(state.win.get_mouse(), &layout);
+	if (state.is_dragging_item)      handle_item_drag(state.win.get_mouse(), &layout);
 	on_repaint(state.win, state.win.bounds);
 }
 
+struct CGRect @feat(MACOS, DARWIN)
+{
+	double x;
+	double y;
+	double w;
+	double h;
+}
+
+extern fn uint cg_main_display_id() @cname("CGMainDisplayID") @feat(MACOS, DARWIN);
+extern fn CGRect cg_display_bounds(uint display) @cname("CGDisplayBounds") @feat(MACOS, DARWIN);
+
 fn GfxRect get_active_workarea()
 {
-	GfxPoint mouse = gfx::get_global_mouse();
-	foreach (mon : gfx::get_monitors())
-	{
-		GfxRect wa = mon.get_workarea();
-		if (mouse.x >= wa.x && mouse.x < wa.x + wa.width &&
-		    mouse.y >= wa.y && mouse.y < wa.y + wa.height)
+	$if $feat(MACOS, DARWIN):
+		uint main_disp = cg_main_display_id();
+		CGRect bounds = cg_display_bounds(main_disp);
+		int menu_bar_h = 25;
+		int h = math::max(WINDOW_HEIGHT, (int)bounds.h - menu_bar_h);
+		return { (int)bounds.x, (int)bounds.y + menu_bar_h, (int)bounds.w, h };
+	$else
+		GfxPoint mouse = gfx::get_global_mouse();
+		foreach (mon : gfx::get_monitors())
 		{
-			return wa;
+			GfxRect wa = mon.get_workarea();
+			if (mouse.x >= wa.x && mouse.x < wa.x + wa.width &&
+			    mouse.y >= wa.y && mouse.y < wa.y + wa.height)
+			{
+				return wa;
+			}
 		}
-	}
-	if (try prim = gfx::get_primary_monitor())
-	{
-		return prim.get_workarea();
-	}
-	return { 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT };
+		if (try prim = gfx::get_primary_monitor())
+		{
+			return prim.get_workarea();
+		}
+		return { 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT };
+	$endif
 }
 
 fn bool parse_cli_args(String[] args, List{String}* cli_paths) => @pool()
@@ -466,14 +508,10 @@ fn void init_app()
 
 	GfxRect wa = get_active_workarea();
 
-	GfxWindowFlags wflags = { .focus, .open_gl, .allow_dnd, .transparent };
+	GfxWindowFlags wflags = { .focus, .open_gl, .allow_dnd};
 	state.win = gfx::create_window(WINDOW_TITLE, wa.x, wa.y, WINDOW_WIDTH, wa.height, wflags)!!;
 	state.win.set_min_size({ WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT });
-	state.win.set_dnd(true);
-	gfx::set_build_dnd(true);
 	state.win.set_repaint_callback(&on_repaint);
-	gfx::set_current_opengl_window(state.win);
-	state.win.set_opengl_swap_interval(1);
 	init_app_icon();
 
 	load_gl();
@@ -566,12 +604,14 @@ fn void init_app_icon()
 	}
 
 	state.win.set_icon(buf.ptr, ICON_SZ, ICON_SZ, RGBA8);
+	tray::init(buf, ICON_SZ, ICON_SZ);
 }
 
 macro lerp(x, y, amount) => x + (y - x) * amount;
 
 fn void cleanup_app()
 {
+	tray::destroy();
 	state.audio.stream_lock.lock();
 	state.audio.disk_thread_running = false;
 	(void)state.audio.buffer_needed.broadcast();
@@ -589,7 +629,7 @@ fn void cleanup_app()
 		state.device = null;
 	}
 
-	audio_unload();
+	state.audio.unload();
 	if (active_soundfont_path.len > 0)
 	{
 		mem::free(active_soundfont_path.ptr);
@@ -603,9 +643,9 @@ fn void cleanup_app()
 	}
 	state.audio.stream_lock.destroy();
 
-	foreach (item : state.playlist)
+	foreach (&item : state.playlist)
 	{
-		mem::free(item.path.ptr);
+		item.destroy();
 	}
 	state.playlist.free();
 	state.shuffle_order.free();
@@ -656,110 +696,101 @@ const GLenum GL_DYNAMIC_DRAW        = 0x88E8;
 const GLenum GL_FRAGMENT_SHADER     = 0x8B30;
 const GLenum GL_VERTEX_SHADER       = 0x8B31;
 
-alias PfnViewport            = fn void(int, int, int, int);
-alias PfnEnable              = fn void(GLenum);
-alias PfnDisable             = fn void(GLenum);
-alias PfnClearColor          = fn void(float, float, float, float);
-alias PfnClear               = fn void(GLbitfield);
-alias PfnColorMask           = fn void(GLboolean, GLboolean, GLboolean, GLboolean);
-alias PfnBlendFunc           = fn void(GLenum, GLenum);
-alias PfnGenTextures         = fn void(int, uint*);
-alias PfnDeleteTextures      = fn void(int, uint*);
-alias PfnBindTexture         = fn void(GLenum, uint);
-alias PfnTexImage2D          = fn void(GLenum, int, int, int, int, int, GLenum, GLenum, void*);
-alias PfnTexParameteri       = fn void(GLenum, GLenum, int);
-alias PfnCreateShader        = fn uint(GLenum);
-alias PfnShaderSource        = fn void(uint, int, char**, int*);
-alias PfnCompileShader       = fn void(uint);
-alias PfnCreateProgram       = fn uint();
-alias PfnAttachShader        = fn void(uint, uint);
-alias PfnLinkProgram         = fn void(uint);
-alias PfnDeleteShader        = fn void(uint);
-alias PfnDeleteProgram       = fn void(uint);
-alias PfnGetUniformLocation  = fn int(uint, char*);
-alias PfnUseProgram          = fn void(uint);
-alias PfnUniform4fv          = fn void(int, int, float*);
-alias PfnGenVertexArrays     = fn void(int, uint*);
-alias PfnDeleteVertexArrays  = fn void(int, uint*);
-alias PfnBindVertexArray     = fn void(uint);
-alias PfnGenBuffers          = fn void(int, uint*);
-alias PfnDeleteBuffers       = fn void(int, uint*);
-alias PfnBindBuffer          = fn void(GLenum, uint);
-alias PfnBufferData          = fn void(GLenum, sz, void*, GLenum);
-alias PfnEnableVertexAttrib  = fn void(uint);
-alias PfnVertexAttribPointer = fn void(uint, int, GLenum, GLboolean, int, void*);
-alias PfnActiveTexture       = fn void(GLenum);
-alias PfnDrawArrays          = fn void(GLenum, int, int);
+alias PfnVoid_Int4         = fn void(int, int, int, int);
+alias PfnVoid_Enum         = fn void(GLenum);
+alias PfnVoid_Float4       = fn void(float, float, float, float);
+alias PfnVoid_Bitfield     = fn void(GLbitfield);
+alias PfnVoid_Bool4        = fn void(GLboolean, GLboolean, GLboolean, GLboolean);
+alias PfnVoid_Enum2        = fn void(GLenum, GLenum);
+alias PfnVoid_Int_UintPtr  = fn void(int, uint*);
+alias PfnVoid_Enum_Uint    = fn void(GLenum, uint);
+alias PfnVoid_TexImage2D   = fn void(GLenum, int, int, int, int, int, GLenum, GLenum, void*);
+alias PfnVoid_Enum2_Int    = fn void(GLenum, GLenum, int);
+alias PfnUint_Enum         = fn uint(GLenum);
+alias PfnVoid_ShaderSource = fn void(uint, int, char**, int*);
+alias PfnUint_Void         = fn uint();
+alias PfnVoid_Uint2        = fn void(uint, uint);
+alias PfnVoid_Uint         = fn void(uint);
+alias PfnInt_Uint_CharPtr  = fn int(uint, char*);
+alias PfnVoid_Uniform4fv   = fn void(int, int, float*);
+alias PfnVoid_BufferData   = fn void(GLenum, sz, void*, GLenum);
+alias PfnVoid_VertexAttrib = fn void(uint, int, GLenum, GLboolean, int, void*);
+alias PfnVoid_Enum_Int2    = fn void(GLenum, int, int);
 
-PfnViewport            gl_viewport;
-PfnEnable              gl_enable;
-PfnDisable             gl_disable;
-PfnClearColor          gl_clear_color;
-PfnClear               gl_clear;
-PfnColorMask           gl_color_mask;
-PfnBlendFunc           gl_blend_func;
-PfnGenTextures         gl_gen_textures;
-PfnDeleteTextures      gl_delete_textures;
-PfnBindTexture         gl_bind_texture;
-PfnTexImage2D          gl_tex_image_2d;
-PfnTexParameteri       gl_tex_parameter_i;
-PfnCreateShader        gl_create_shader;
-PfnShaderSource        gl_shader_source;
-PfnCompileShader       gl_compile_shader;
-PfnCreateProgram       gl_create_program;
-PfnAttachShader        gl_attach_shader;
-PfnLinkProgram         gl_link_program;
-PfnDeleteShader        gl_delete_shader;
-PfnDeleteProgram       gl_delete_program;
-PfnGetUniformLocation  gl_get_uniform_location;
-PfnUseProgram          gl_use_program;
-PfnUniform4fv          gl_uniform_4fv;
-PfnGenVertexArrays     gl_gen_vertex_arrays;
-PfnDeleteVertexArrays  gl_delete_vertex_arrays;
-PfnBindVertexArray     gl_bind_vertex_array;
-PfnGenBuffers          gl_gen_buffers;
-PfnDeleteBuffers       gl_delete_buffers;
-PfnBindBuffer          gl_bind_buffer;
-PfnBufferData          gl_buffer_data;
-PfnEnableVertexAttrib  gl_enable_vertex_attrib_array;
-PfnVertexAttribPointer gl_vertex_attrib_pointer;
-PfnActiveTexture       gl_active_texture;
-PfnDrawArrays          gl_draw_arrays;
+PfnVoid_Int4         gl_viewport;
+PfnVoid_Enum         gl_enable;
+PfnVoid_Enum         gl_disable;
+PfnVoid_Float4       gl_clear_color;
+PfnVoid_Bitfield     gl_clear;
+PfnVoid_Bool4        gl_color_mask;
+PfnVoid_Enum2        gl_blend_func;
+PfnVoid_Int_UintPtr  gl_gen_textures;
+PfnVoid_Int_UintPtr  gl_delete_textures;
+PfnVoid_Enum_Uint    gl_bind_texture;
+PfnVoid_TexImage2D   gl_tex_image_2d;
+PfnVoid_Enum2_Int    gl_tex_parameter_i;
+PfnUint_Enum         gl_create_shader;
+PfnVoid_ShaderSource gl_shader_source;
+PfnVoid_Uint         gl_compile_shader;
+PfnUint_Void         gl_create_program;
+PfnVoid_Uint2        gl_attach_shader;
+PfnVoid_Uint         gl_link_program;
+PfnVoid_Uint         gl_delete_shader;
+PfnVoid_Uint         gl_delete_program;
+PfnInt_Uint_CharPtr  gl_get_uniform_location;
+PfnVoid_Uint         gl_use_program;
+PfnVoid_Uniform4fv   gl_uniform_4fv;
+PfnVoid_Int_UintPtr  gl_gen_vertex_arrays;
+PfnVoid_Int_UintPtr  gl_delete_vertex_arrays;
+PfnVoid_Uint         gl_bind_vertex_array;
+PfnVoid_Int_UintPtr  gl_gen_buffers;
+PfnVoid_Int_UintPtr  gl_delete_buffers;
+PfnVoid_Enum_Uint    gl_bind_buffer;
+PfnVoid_BufferData   gl_buffer_data;
+PfnVoid_Uint         gl_enable_vertex_attrib_array;
+PfnVoid_VertexAttrib gl_vertex_attrib_pointer;
+PfnVoid_Enum         gl_active_texture;
+PfnVoid_Enum_Int2    gl_draw_arrays;
+
+macro @gl_load(#fn_var, $name)
+{
+	#fn_var = ($Typeof(#fn_var))gfx::get_opengl_proc($name);
+}
 
 fn void load_gl()
 {
-	gl_viewport                   = (PfnViewport)gfx::get_opengl_proc("glViewport");
-	gl_enable                     = (PfnEnable)gfx::get_opengl_proc("glEnable");
-	gl_disable                    = (PfnDisable)gfx::get_opengl_proc("glDisable");
-	gl_clear_color                = (PfnClearColor)gfx::get_opengl_proc("glClearColor");
-	gl_clear                      = (PfnClear)gfx::get_opengl_proc("glClear");
-	gl_color_mask                 = (PfnColorMask)gfx::get_opengl_proc("glColorMask");
-	gl_blend_func                 = (PfnBlendFunc)gfx::get_opengl_proc("glBlendFunc");
-	gl_gen_textures               = (PfnGenTextures)gfx::get_opengl_proc("glGenTextures");
-	gl_delete_textures            = (PfnDeleteTextures)gfx::get_opengl_proc("glDeleteTextures");
-	gl_bind_texture               = (PfnBindTexture)gfx::get_opengl_proc("glBindTexture");
-	gl_tex_image_2d               = (PfnTexImage2D)gfx::get_opengl_proc("glTexImage2D");
-	gl_tex_parameter_i            = (PfnTexParameteri)gfx::get_opengl_proc("glTexParameteri");
-	gl_create_shader              = (PfnCreateShader)gfx::get_opengl_proc("glCreateShader");
-	gl_shader_source              = (PfnShaderSource)gfx::get_opengl_proc("glShaderSource");
-	gl_compile_shader             = (PfnCompileShader)gfx::get_opengl_proc("glCompileShader");
-	gl_create_program             = (PfnCreateProgram)gfx::get_opengl_proc("glCreateProgram");
-	gl_attach_shader              = (PfnAttachShader)gfx::get_opengl_proc("glAttachShader");
-	gl_link_program               = (PfnLinkProgram)gfx::get_opengl_proc("glLinkProgram");
-	gl_delete_shader              = (PfnDeleteShader)gfx::get_opengl_proc("glDeleteShader");
-	gl_delete_program             = (PfnDeleteProgram)gfx::get_opengl_proc("glDeleteProgram");
-	gl_get_uniform_location       = (PfnGetUniformLocation)gfx::get_opengl_proc("glGetUniformLocation");
-	gl_use_program                = (PfnUseProgram)gfx::get_opengl_proc("glUseProgram");
-	gl_uniform_4fv                = (PfnUniform4fv)gfx::get_opengl_proc("glUniform4fv");
-	gl_gen_vertex_arrays          = (PfnGenVertexArrays)gfx::get_opengl_proc("glGenVertexArrays");
-	gl_delete_vertex_arrays       = (PfnDeleteVertexArrays)gfx::get_opengl_proc("glDeleteVertexArrays");
-	gl_bind_vertex_array          = (PfnBindVertexArray)gfx::get_opengl_proc("glBindVertexArray");
-	gl_gen_buffers                = (PfnGenBuffers)gfx::get_opengl_proc("glGenBuffers");
-	gl_delete_buffers             = (PfnDeleteBuffers)gfx::get_opengl_proc("glDeleteBuffers");
-	gl_bind_buffer                = (PfnBindBuffer)gfx::get_opengl_proc("glBindBuffer");
-	gl_buffer_data                = (PfnBufferData)gfx::get_opengl_proc("glBufferData");
-	gl_enable_vertex_attrib_array = (PfnEnableVertexAttrib)gfx::get_opengl_proc("glEnableVertexAttribArray");
-	gl_vertex_attrib_pointer      = (PfnVertexAttribPointer)gfx::get_opengl_proc("glVertexAttribPointer");
-	gl_active_texture             = (PfnActiveTexture)gfx::get_opengl_proc("glActiveTexture");
-	gl_draw_arrays                = (PfnDrawArrays)gfx::get_opengl_proc("glDrawArrays");
+	@gl_load(gl_viewport,                   "glViewport");
+	@gl_load(gl_enable,                     "glEnable");
+	@gl_load(gl_disable,                    "glDisable");
+	@gl_load(gl_clear_color,                "glClearColor");
+	@gl_load(gl_clear,                      "glClear");
+	@gl_load(gl_color_mask,                 "glColorMask");
+	@gl_load(gl_blend_func,                 "glBlendFunc");
+	@gl_load(gl_gen_textures,               "glGenTextures");
+	@gl_load(gl_delete_textures,            "glDeleteTextures");
+	@gl_load(gl_bind_texture,               "glBindTexture");
+	@gl_load(gl_tex_image_2d,               "glTexImage2D");
+	@gl_load(gl_tex_parameter_i,            "glTexParameteri");
+	@gl_load(gl_create_shader,              "glCreateShader");
+	@gl_load(gl_shader_source,              "glShaderSource");
+	@gl_load(gl_compile_shader,             "glCompileShader");
+	@gl_load(gl_create_program,             "glCreateProgram");
+	@gl_load(gl_attach_shader,              "glAttachShader");
+	@gl_load(gl_link_program,               "glLinkProgram");
+	@gl_load(gl_delete_shader,              "glDeleteShader");
+	@gl_load(gl_delete_program,             "glDeleteProgram");
+	@gl_load(gl_get_uniform_location,       "glGetUniformLocation");
+	@gl_load(gl_use_program,                "glUseProgram");
+	@gl_load(gl_uniform_4fv,                "glUniform4fv");
+	@gl_load(gl_gen_vertex_arrays,          "glGenVertexArrays");
+	@gl_load(gl_delete_vertex_arrays,       "glDeleteVertexArrays");
+	@gl_load(gl_bind_vertex_array,          "glBindVertexArray");
+	@gl_load(gl_gen_buffers,                "glGenBuffers");
+	@gl_load(gl_delete_buffers,             "glDeleteBuffers");
+	@gl_load(gl_bind_buffer,                "glBindBuffer");
+	@gl_load(gl_buffer_data,                "glBufferData");
+	@gl_load(gl_enable_vertex_attrib_array, "glEnableVertexAttribArray");
+	@gl_load(gl_vertex_attrib_pointer,      "glVertexAttribPointer");
+	@gl_load(gl_active_texture,             "glActiveTexture");
+	@gl_load(gl_draw_arrays,                "glDrawArrays");
 }
