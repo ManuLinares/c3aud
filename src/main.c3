@@ -266,66 +266,72 @@ fn void main(String[] args) @winmain
 	$if $feat(EMSCRIPTEN | WASM):
 		emscripten_set_main_loop(&step_web, 0, 1);
 	$else
-		const Duration FRAME_DURATION = time::SEC / 60;
+		const Duration FRAME_DURATION    = time::SEC / 60;
+		const Duration BG_PROBE_BUDGET   = time::MS * 50;
+		const Duration BG_PROBE_INTERVAL = time::MS * 20;
 		on_repaint(state.win, state.win.bounds);
 
 		while (!state.win.should_close())
 		{
 			@pool()
 			{
+				bool visible = !state.win.is_minimized() && !state.win.is_hidden() && state.win.width > 0 && state.win.height > 0;
 				bool needs_background_work = state.unprobed_count > 0;
-				if (state.audio.is_playing || state.is_dragging_item || needs_background_work)
+
+				switch
 				{
-					Time start_time = time::now();
-					Time deadline = start_time + FRAME_DURATION;
+					case visible && (state.audio.is_playing || state.is_dragging_item || needs_background_work):
+						Time start_time = time::now();
+						Time deadline = start_time + FRAME_DURATION;
 
-					while (try ev = gfx::poll(state.win))
-					{
-						dispatch_event(&ev);
-					}
-
-					if (state.audio.track_eof)
-					{
-						state.audio.track_eof = false;
-						if (state.repeat_mode)
-						{
-							audio_seek_absolute(0);
-							state.audio.is_playing = true;
-						}
-						else
-						{
-							play_next_track();
-						}
-					}
-
-					if (state.is_dragging_timeline)  handle_timeline_drag(state.win.get_mouse());
-					if (state.is_dragging_volume)    handle_volume_drag(state.win.get_mouse());
-					if (state.is_dragging_scrollbar) handle_scrollbar_drag(state.win.get_mouse());
-					if (state.is_dragging_item)      handle_item_drag(state.win.get_mouse());
-
-					probe_next_track_metadata(deadline);
-					on_repaint(state.win, state.win.bounds);
-
-					Duration remaining = deadline - time::now();
-					if (remaining > (Duration)0)
-					{
-						if (try ev = gfx::wait(remaining))
+						while (try ev = gfx::poll(state.win))
 						{
 							dispatch_event(&ev);
 						}
-					}
-				}
-				else
-				{
-					if (try ev = gfx::wait(gfx::WAIT_FOREVER))
-					{
-						dispatch_event(&ev);
-						while (try queued = gfx::poll(state.win))
-						{
-							dispatch_event(&queued);
-						}
+
 						on_repaint(state.win, state.win.bounds);
-					}
+
+						if (time::now() < deadline)
+						{
+							probe_next_track_metadata(deadline);
+						}
+
+						Duration remaining = deadline - time::now();
+						if (remaining > (Duration)0)
+						{
+							if (try ev = gfx::wait(remaining))
+							{
+								dispatch_event(&ev);
+							}
+						}
+					case needs_background_work:
+						Time start_time = time::now();
+						Time deadline = start_time + BG_PROBE_BUDGET;
+
+						while (try ev = gfx::poll(state.win))
+						{
+							dispatch_event(&ev);
+						}
+
+						probe_next_track_metadata(deadline);
+
+						if (try ev = gfx::wait(BG_PROBE_INTERVAL))
+						{
+							dispatch_event(&ev);
+						}
+					default:
+						if (try ev = gfx::wait(gfx::WAIT_FOREVER))
+						{
+							dispatch_event(&ev);
+							while (try queued = gfx::poll(state.win))
+							{
+								dispatch_event(&queued);
+							}
+							if (!state.win.is_minimized() && !state.win.is_hidden())
+							{
+								on_repaint(state.win, state.win.bounds);
+							}
+						}
 				}
 			};
 		}
@@ -468,6 +474,7 @@ fn void init_app()
 	state.win.set_repaint_callback(&on_repaint);
 	gfx::set_current_opengl_window(state.win);
 	state.win.set_opengl_swap_interval(1);
+	init_app_icon();
 
 	load_gl();
 
@@ -504,6 +511,64 @@ fn void init_app()
 		state.audio.disk_thread.create(&disk_stream_worker, &state.audio)!!;
 	$endif
 }
+
+fn void init_app_icon()
+{
+	const int ICON_SZ = 64;
+	char[] buf = mem::new_array(char, ICON_SZ * ICON_SZ * 4);
+	defer free(buf);
+
+	float[4] sub_offsets = { 0.25f, 0.75f, 0.25f, 0.75f };
+
+	for (int y = 0; y < ICON_SZ; y++)
+	{
+		for (int x = 0; x < ICON_SZ; x++)
+		{
+			float accum_r = 0.0f;
+			float accum_g = 0.0f;
+			float accum_b = 0.0f;
+			float accum_a = 0.0f;
+
+			for (int s = 0; s < 4; s++)
+			{
+				float fx = (float)x + sub_offsets[s];
+				float fy = (float)y + sub_offsets[(s + 1) % 4];
+
+				float d_circ = math::hypot(fx - 32.0f, fy - 32.0f);
+				float bg_alpha = math::clamp(0.5f + (30.0f - d_circ), 0.0f, 1.0f);
+				if (bg_alpha <= 0.0f) continue;
+
+				float d1 = dist_to_arc(fx, fy, 32.0f, 75.0f, 52.0f, -1.92f, -1.22f);
+				float d2 = dist_to_arc(fx, fy, 32.0f, 75.0f, 43.0f, -1.86f, -1.28f);
+				float d3 = dist_to_arc(fx, fy, 32.0f, 75.0f, 34.0f, -1.79f, -1.35f);
+
+				float a1 = math::clamp(0.5f + (2.4f - d1), 0.0f, 1.0f);
+				float a2 = math::clamp(0.5f + (2.4f - d2), 0.0f, 1.0f);
+				float a3 = math::clamp(0.5f + (2.2f - d3), 0.0f, 1.0f);
+				float wave_alpha = math::max(a1, math::max(a2, a3));
+
+				float r = lerp(41.0f, 18.0f, wave_alpha);
+				float g = lerp(242.0f, 18.0f, wave_alpha);
+				float b = lerp(11.0f, 18.0f, wave_alpha);
+
+				accum_r += r * bg_alpha;
+				accum_g += g * bg_alpha;
+				accum_b += b * bg_alpha;
+				accum_a += bg_alpha;
+			}
+
+			int p = (y * ICON_SZ + x) * 4;
+			buf[p + 0] = (char)(accum_r * 0.25f + 0.5f);
+			buf[p + 1] = (char)(accum_g * 0.25f + 0.5f);
+			buf[p + 2] = (char)(accum_b * 0.25f + 0.5f);
+			buf[p + 3] = (char)(accum_a * 0.25f * 255.0f + 0.5f);
+		}
+	}
+
+	state.win.set_icon(buf.ptr, ICON_SZ, ICON_SZ, RGBA8);
+}
+
+macro lerp(x, y, amount) => x + (y - x) * amount;
 
 fn void cleanup_app()
 {

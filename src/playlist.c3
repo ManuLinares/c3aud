@@ -331,12 +331,11 @@ fn void probe_next_track_metadata(Time deadline) => @pool()
 	int count = (int)state.playlist.len();
 	if (count == 0 || state.unprobed_count <= 0) return;
 
-	const Duration SAFETY_MARGIN = 4 * time::MS;
 	int inspected = 0;
 
 	while (inspected < count && state.unprobed_count > 0)
 	{
-		if (time::now() + SAFETY_MARGIN >= deadline) break;
+		if (time::now() >= deadline) break;
 
 		int idx = state.probe_cursor % count;
 		state.probe_cursor = (idx + 1) % count;
@@ -436,12 +435,12 @@ fn bool add_file_to_playlist(String raw_path, int insert_idx) => @pool()
 	return true;
 }
 
-fn void play_track_index(int idx)
+fn bool play_track_index(int idx)
 {
-	if (idx < 0 || idx >= state.playlist.len()) return;
+	if (idx < 0 || idx >= state.playlist.len()) return false;
 
 	PlaylistItem item = state.playlist[idx];
-	if (!audio_play_file(item.token, item.path)) return;
+	if (!audio_play_file(item.token, item.path)) return false;
 
 	if (state.playlist[idx].total_frames == 0)
 	{
@@ -464,6 +463,7 @@ fn void play_track_index(int idx)
 		}
 	}
 	ensure_track_visible(idx);
+	return true;
 }
 
 fn void play_next_track()
@@ -471,20 +471,30 @@ fn void play_next_track()
 	int count = (int)state.playlist.len();
 	if (count == 0) return;
 
-	if (state.shuffle_mode)
+	int start_idx = playlist_get_current_index();
+	if (start_idx < 0) start_idx = state.selected_track_idx;
+
+	for (int attempts = 1; attempts <= count; attempts++)
 	{
-		if (state.shuffle_order.len() != (sz)count)
+		int target_idx;
+		if (state.shuffle_mode)
 		{
-			rebuild_shuffle_order();
+			if (state.shuffle_order.len() != (sz)count)
+			{
+				rebuild_shuffle_order();
+			}
+			state.shuffle_pos = (state.shuffle_pos + 1) % count;
+			target_idx = state.shuffle_order[state.shuffle_pos];
 		}
-		state.shuffle_pos = (state.shuffle_pos + 1) % count;
-		play_track_index(state.shuffle_order[state.shuffle_pos]);
-		return;
+		else
+		{
+			target_idx = (start_idx + attempts) % count;
+		}
+
+		if (play_track_index(target_idx)) return;
 	}
 
-	int cur = playlist_get_current_index();
-	int next_idx = (cur + 1) % count;
-	play_track_index(next_idx);
+	audio_unload();
 }
 
 fn void playlist_select_single(int idx)

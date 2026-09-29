@@ -50,7 +50,6 @@ const uint RING_BUFFER_FRAMES   = AUDIO_SAMPLE_RATE * 2;
 const double SAMPLES_PER_MS     = AUDIO_SAMPLE_RATE / (double)time::MS;
 const ulong PREV_TRACK_REWIND_THRESHOLD_FRAMES = 3 * AUDIO_SAMPLE_RATE;
 
-const int AV_LOG_QUIET = -8;
 const uint SCOPE_SIZE  = 1024;
 const int AVSEEK_FLAG_BACKWARD = 1;
 
@@ -445,7 +444,6 @@ struct AudioDecoder
 {
 	DecoderType type;
 	ulong total_frames;
-	bool eof_reached;
 	union
 	{
 		FfmpegDecoder* ffmpeg;
@@ -600,7 +598,6 @@ fn AudioDecoder*? audio_decoder_open(String path) => @pool()
 		dec.type = MIDI;
 		dec.midi = midi;
 		dec.total_frames = midi.total_frames;
-		dec.eof_reached = false;
 		return dec;
 	}
 
@@ -611,7 +608,6 @@ fn AudioDecoder*? audio_decoder_open(String path) => @pool()
 	dec.type = FFMPEG;
 	dec.ffmpeg = ffmpeg;
 	dec.total_frames = ffmpeg.total_frames;
-	dec.eof_reached = false;
 	return dec;
 }
 
@@ -634,23 +630,16 @@ fn void audio_decoder_seek(AudioDecoder* dec, ulong frame_target)
 		case MIDI:   midi_decoder_seek(dec.midi, frame_target);
 		case FFMPEG: ffmpeg_decoder_seek(dec.ffmpeg, frame_target);
 	}
-	dec.eof_reached = false;
 }
 
 fn ulong audio_decoder_read(AudioDecoder* dec, void* p_buf, ulong frames_to_read)
 {
 	if (dec == null) return 0;
-	ulong read = 0;
 	switch (dec.type)
 	{
-		case MIDI:
-			read = midi_decoder_read(dec.midi, p_buf, frames_to_read);
-			dec.eof_reached = dec.midi.eof_reached;
-		case FFMPEG:
-			read = ffmpeg_decoder_read(dec.ffmpeg, p_buf, frames_to_read);
-			dec.eof_reached = dec.ffmpeg.eof_reached;
+		case MIDI:   return midi_decoder_read(dec.midi, p_buf, frames_to_read);
+		case FFMPEG: return ffmpeg_decoder_read(dec.ffmpeg, p_buf, frames_to_read);
 	}
-	return read;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -676,6 +665,7 @@ struct AudioEngine
 	ulong track_frames;
 	ulong track_cursor;
 	bool is_track_loaded;
+	bool decoder_eof;
 	bool track_eof;
 
 	float[SCOPE_SIZE] scope_buffer;
@@ -745,9 +735,15 @@ fn void audio_callback(MaDevice* p_device, void* p_output, void* p_input, uint f
 		total_read += mapped;
 	}
 
-	if (!audio.track_eof)
+	if (!audio.decoder_eof)
 	{
 		(void)audio.buffer_needed.signal();
+	}
+	else if (ma::ring_buffer_length(&audio.rb.rb) == 0 && !audio.track_eof)
+	{
+		audio.track_eof = true;
+		(void)audio.buffer_needed.signal();
+		gfx::wake();
 	}
 
 	if (audio.volume != 1.0f)
@@ -784,6 +780,23 @@ fn int disk_stream_worker(void* arg) => @pool_init(mem, 64 * 1024)
 	audio.stream_lock.lock();
 	while (audio.disk_thread_running)
 	{
+		if (audio.track_eof)
+		{
+			audio.track_eof = false;
+			audio.stream_lock.unlock();
+			if (state.repeat_mode)
+			{
+				audio_seek_absolute(0);
+				state.audio.is_playing = true;
+			}
+			else
+			{
+				play_next_track();
+			}
+			audio.stream_lock.lock();
+			continue;
+		}
+
 		if (audio.requested_seek >= 0 && audio.decoder != null)
 		{
 			ulong target = (ulong)audio.requested_seek;
@@ -791,6 +804,7 @@ fn int disk_stream_worker(void* arg) => @pool_init(mem, 64 * 1024)
 			audio_decoder_seek(audio.decoder, target);
 			audio.reset_rb();
 			audio.track_cursor = target;
+			audio.decoder_eof = false;
 			audio.track_eof = false;
 		}
 
@@ -800,8 +814,14 @@ fn int disk_stream_worker(void* arg) => @pool_init(mem, 64 * 1024)
 			continue;
 		}
 
+		if (audio.decoder_eof)
+		{
+			audio.buffer_needed.wait(&audio.stream_lock);
+			continue;
+		}
+
 		uint avail = ma::ring_buffer_capacity(&audio.rb.rb) - ma::ring_buffer_length(&audio.rb.rb);
-		if (avail < DISK_STREAM_MIN_AVAIL_FRAMES && !audio.track_eof)
+		if (avail < DISK_STREAM_MIN_AVAIL_FRAMES)
 		{
 			audio.buffer_needed.wait(&audio.stream_lock);
 			continue;
@@ -825,7 +845,7 @@ fn int disk_stream_worker(void* arg) => @pool_init(mem, 64 * 1024)
 
 		if (frames_read < (ulong)mapped)
 		{
-			audio.track_eof = true;
+			audio.decoder_eof = true;
 			audio.buffer_needed.wait(&audio.stream_lock);
 		}
 	}
@@ -858,6 +878,7 @@ fn bool audio_play_file(uint token, String path) => @pool()
 	state.audio.decoder         = new_decoder;
 	state.audio.track_frames    = new_decoder.total_frames;
 	state.audio.track_cursor    = 0;
+	state.audio.decoder_eof     = false;
 	state.audio.track_eof       = false;
 	state.audio.is_track_loaded = true;
 	state.audio.is_playing      = true;
@@ -879,6 +900,7 @@ fn void audio_unload()
 	state.audio.loaded_token    = 0;
 	state.audio.track_cursor    = 0;
 	state.audio.track_frames    = 0;
+	state.audio.decoder_eof     = false;
 	state.audio.track_eof       = false;
 	state.audio.is_playing      = false;
 	state.audio.is_track_loaded = false;
@@ -900,6 +922,7 @@ fn void audio_stop()
 	}
 	state.audio.reset_rb();
 	state.audio.track_cursor = 0;
+	state.audio.decoder_eof = false;
 	state.audio.track_eof = false;
 	state.audio.is_playing = false;
 

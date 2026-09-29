@@ -688,6 +688,19 @@ fn void draw_ui(GfxSize win_sz, GfxPoint cur_m, UiLayout* layout)
 
 	draw_text(win_sz, "PLAYLIST", layout.playlist_label.x, layout.playlist_label.y, 14, { 0.7f, 0.75f, 0.8f, 1.0f });
 
+	int count_x = layout.playlist_label.x + 56;
+	String count_str = state.filter_active
+		? string::tformat("[%d/%d]", (int)state.filtered_indices.len(), (int)state.playlist.len())
+		: string::tformat("[%d]", (int)state.playlist.len());
+	draw_text(win_sz, count_str, count_x, layout.playlist_label.y, 14, { 0.45f, 0.50f, 0.55f, 1.0f });
+
+	if (state.unprobed_count > 0)
+	{
+		int probe_x = count_x + (int)count_str.len * 6 + 12;
+		String probe_str = string::tformat("PROBING: %d", state.unprobed_count);
+		draw_text(win_sz, probe_str, probe_x, layout.playlist_label.y, 14, { 0.95f, 0.85f, 0.4f, 1.0f });
+	}
+
 	if (count == 0)
 	{
 		const String EMPTY_MSG = "DROP AUDIO FILES OR FOLDERS ANYWHERE TO ADD TO PLAYLIST";
@@ -863,6 +876,22 @@ fn float dist_pt_to_triangle(float px, float py, float x0, float y0, float x1, f
 	float e1 = dist_pt_to_segment(px, py, x1, y1, x2, y2);
 	float e2 = dist_pt_to_segment(px, py, x2, y2, x0, y0);
 	return math::min(e0, math::min(e1, e2));
+}
+
+fn float dist_to_arc(float px, float py, float cx, float cy, float r, float a_min, float a_max)
+{
+	float dx = px - cx;
+	float dy = py - cy;
+	float angle = math::atan2(dy, dx);
+	if (angle >= a_min && angle <= a_max)
+	{
+		return math::abs(math::hypot(dx, dy) - r);
+	}
+	float p0x = cx + r * math::cos(a_min);
+	float p0y = cy + r * math::sin(a_min);
+	float p1x = cx + r * math::cos(a_max);
+	float p1y = cy + r * math::sin(a_max);
+	return math::min(math::hypot(px - p0x, py - p0y), math::hypot(px - p1x, py - p1y));
 }
 
 fn void init_icons()
