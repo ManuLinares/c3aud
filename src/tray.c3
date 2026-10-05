@@ -867,7 +867,7 @@ fn void destroy()
 // Linux Backend (D-Bus / StatusNotifierItem)
 // ─────────────────────────────────────────────────────────────────────────────
 
-module tray::linux @feat(LINUX);
+module tray::linux @feat(LINUX) @link("dbus-1");
 
 import std::thread;
 import std::gfx;

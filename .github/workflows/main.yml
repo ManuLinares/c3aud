@@ -40,7 +40,8 @@ jobs:
             libx11-dev \
             libxext-dev \
             libxrandr-dev \
-            libgl1-mesa-dev
+            libgl1-mesa-dev \
+            libdbus-1-dev
 
       - name: Get current month
         id: get-date

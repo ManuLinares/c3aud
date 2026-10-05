@@ -508,7 +508,7 @@ fn void init_app()
 
 	GfxRect wa = get_active_workarea();
 
-	GfxWindowFlags wflags = { .focus, .open_gl, .allow_dnd};
+	GfxWindowFlags wflags = { .focus, .open_gl, .allow_dnd, .transparent };
 	state.win = gfx::create_window(WINDOW_TITLE, wa.x, wa.y, WINDOW_WIDTH, wa.height, wflags)!!;
 	state.win.set_min_size({ WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT });
 	state.win.set_repaint_callback(&on_repaint);

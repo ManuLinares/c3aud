@@ -23,7 +23,8 @@
 				"-lavcodec",
 				"-lswresample",
 				"-lavutil",
-				"-Wl,--end-group"
+				"-Wl,--end-group",
+				"-ldbus-1"
 			]
 		},
 		"windows": {
@@ -48,6 +49,9 @@
 			"cflags": "--target=arm64-apple-macos11.0 -isysroot deps/MacOSX.sdk",
 			"linker-search-paths": [
 				"deps/ffmpeg-macos-aarch64/lib"
+			],
+			"link-args": [
+				"-platform_version", "macos", "11.0.0", "11.0.0"
 			]
 		},
 		"macos-x64": {
@@ -58,6 +62,9 @@
 			"cflags": "--target=x86_64-apple-macos11.0 -isysroot deps/MacOSX.sdk",
 			"linker-search-paths": [
 				"deps/ffmpeg-macos-x64/lib"
+			],
+			"link-args": [
+				"-platform_version", "macos", "11.0.0", "11.0.0"
 			]
 		},
 		"web": {
